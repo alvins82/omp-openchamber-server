@@ -1,0 +1,15 @@
+{
+  "name": "openchamber-omp-proxy",
+  "version": "0.0.1",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "private": true,
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "test": "bun test",
+    "check": "bun run --bun tsc --noEmit"
+  },
+  "type": "module"
+}
