@@ -119,7 +119,6 @@ describe("reduceToolPartState", () => {
 
     expect(state.input).toEqual({
       path: "README.md",
-      i: "Reading README",
       description: "Reading README",
     });
   });
@@ -257,5 +256,52 @@ describe("reduceToolPartState", () => {
     expect(state.status).toBe("error");
     expect(state.error).toBe("SyntaxError: Unexpected token");
   });
+
+  it("normalizes glob tool inputs by splitting path and pattern and removing metadata", () => {
+    const state = reduceToolPartState(
+      undefined,
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-glob-1",
+        name: "glob",
+        arguments: {
+          path: "/Users/alvin/claude-cowork/hangar/**",
+          l: "Finding existing files in hangar",
+          description: "Finding existing files in hangar",
+        },
+      },
+      1000,
+      "glob",
+    );
+
+    expect(state.status).toBe("running");
+    expect(state.input).toEqual({
+      path: "/Users/alvin/claude-cowork/hangar",
+      pattern: "**",
+    });
+  });
+
+  it("normalizes glob tool 'No files found matching pattern' output to empty string", () => {
+    const current: ToolPartState = {
+      status: "running",
+      input: { path: "/Users/alvin/claude-cowork/hangar", pattern: "**" },
+      time: { start: 1000 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-glob-1",
+        output: "No files found matching pattern",
+      },
+      2000,
+      "glob",
+    );
+
+    expect(state.status).toBe("completed");
+    expect(state.output).toBe("");
+  });
 });
+
 

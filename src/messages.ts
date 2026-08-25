@@ -7,6 +7,7 @@ import {
   listPersistedMessageIds,
   recordPersistedMessageId,
 } from "./title-db";
+import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
 
 export interface OpenCodeMessageRecord {
   info: {
@@ -162,6 +163,9 @@ function createToolPart(
   if (input && !input.description && (input.intent || input.i || raw.intent)) {
     input.description = (input.intent ?? input.i ?? raw.intent) as string;
   }
+  if (input) {
+    input = normalizeToolInput(tool, input);
+  }
 
   return {
     id: `part_${openCodeId}_${messageId}_tool_${index}_${block.id ?? tool}`,
@@ -223,7 +227,7 @@ function mergeToolResultIntoAssistant(
   if (isError) {
     target.state.error = content;
   } else {
-    target.state.output = content;
+    target.state.output = normalizeToolOutput(target.tool, content, msg.details ?? raw.details);
   }
   target.state.time.end = resultTime;
   return true;

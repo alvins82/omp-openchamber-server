@@ -20,6 +20,7 @@ import {
   type PermissionRequest,
   type QuestionRequest,
 } from "./approvals";
+import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
 import { randomUUID } from "node:crypto";
 
 interface OpenCodeTextPart {
@@ -372,14 +373,68 @@ function getToolError(obj: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+function getToolCallId(obj: Record<string, unknown>): string | undefined {
+  if (typeof obj.toolCall === "object" && obj.toolCall != null) {
+    const id = getToolCallId(obj.toolCall as Record<string, unknown>);
+    if (id) return id;
+  }
+  if (typeof obj.data === "object" && obj.data != null) {
+    const id = getToolCallId(obj.data as Record<string, unknown>);
+    if (id) return id;
+  }
+  if (
+    typeof obj.partial === "object" &&
+    obj.partial != null &&
+    Array.isArray((obj.partial as { content?: unknown[] }).content)
+  ) {
+    const content = (obj.partial as { content: unknown[] }).content;
+    const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
+    const block = content[idx];
+    if (block && typeof block === "object") {
+      const id = getToolCallId(block as Record<string, unknown>);
+      if (id) return id;
+    }
+  }
+  const value = obj.toolCallId ?? obj.tool_call_id ?? obj.callId ?? obj.call_id ?? obj.id ?? obj.toolCallID;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function getToolName(obj: Record<string, unknown>): string | undefined {
+  if (typeof obj.toolCall === "object" && obj.toolCall != null) {
+    const name = getToolName(obj.toolCall as Record<string, unknown>);
+    if (name) return name;
+  }
+  if (typeof obj.data === "object" && obj.data != null) {
+    const name = getToolName(obj.data as Record<string, unknown>);
+    if (name) return name;
+  }
+  if (
+    typeof obj.partial === "object" &&
+    obj.partial != null &&
+    Array.isArray((obj.partial as { content?: unknown[] }).content)
+  ) {
+    const content = (obj.partial as { content: unknown[] }).content;
+    const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
+    const block = content[idx];
+    if (block && typeof block === "object") {
+      const name = getToolName(block as Record<string, unknown>);
+      if (name) return name;
+    }
+  }
+  const value = obj.name ?? obj.tool ?? obj.toolName ?? obj.tool_name ?? obj.function;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export function reduceToolPartState(
   current: ToolPartState | undefined,
   event: Record<string, unknown>,
   now = Date.now(),
+  toolName?: string,
 ): ToolPartState {
   const state: ToolPartState = current ? { ...current } : { status: "pending" };
   if (state.time) state.time = { ...state.time };
   const type = ((event.type ?? event.customType) as string) || "";
+  const resolvedToolName = toolName ?? getToolName(event);
 
   const intentHint =
     (typeof event.intent === "string" && event.intent.length > 0 ? event.intent : undefined) ??
@@ -413,8 +468,15 @@ export function reduceToolPartState(
 
   const input = rawInput != null ? parseToolInput(rawInput, intentHint) : undefined;
   if (input && Object.keys(input).length > 0) {
-    state.input = { ...state.input, ...input };
+    const normalizedInput = normalizeToolInput(resolvedToolName, input);
+    state.input = { ...state.input, ...normalizedInput };
   }
+
+  const rawDetails =
+    event.details ??
+    (typeof event.data === "object" && event.data != null
+      ? (event.data as Record<string, unknown>).details
+      : undefined);
 
   if (
     type === "toolcall_start" ||
@@ -435,10 +497,11 @@ export function reduceToolPartState(
     }
     const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.partialResult ?? event.partial_result ?? (typeof event.data === "object" && event.data != null ? event.data : undefined));
     if (output != null) {
-      if (state.output && !output.startsWith(state.output)) {
-        state.output = state.output + "\n" + output;
+      const normalizedOutput = normalizeToolOutput(resolvedToolName, output, rawDetails);
+      if (state.output && normalizedOutput && !normalizedOutput.startsWith(state.output)) {
+        state.output = state.output + "\n" + normalizedOutput;
       } else {
-        state.output = output;
+        state.output = normalizedOutput;
       }
     }
   } else if (type === "tool_execution_end") {
@@ -450,7 +513,9 @@ export function reduceToolPartState(
       state.status = "completed";
     }
     const output = formatToolOutput(event.output ?? event.content ?? event.result ?? (typeof event.data === "object" && event.data != null ? event.data : undefined));
-    if (output != null) state.output = output;
+    if (output != null) {
+      state.output = normalizeToolOutput(resolvedToolName, output, rawDetails);
+    }
     if (!state.time) state.time = { start: now };
     state.time.end = now;
   }
@@ -506,58 +571,6 @@ export function createEventHandler(
     activePartText = "";
   };
 
-  const getToolCallId = (obj: Record<string, unknown>): string | undefined => {
-    if (typeof obj.toolCall === "object" && obj.toolCall != null) {
-      const id = getToolCallId(obj.toolCall as Record<string, unknown>);
-      if (id) return id;
-    }
-    if (typeof obj.data === "object" && obj.data != null) {
-      const id = getToolCallId(obj.data as Record<string, unknown>);
-      if (id) return id;
-    }
-    if (
-      typeof obj.partial === "object" &&
-      obj.partial != null &&
-      Array.isArray((obj.partial as { content?: unknown[] }).content)
-    ) {
-      const content = (obj.partial as { content: unknown[] }).content;
-      const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
-      const block = content[idx];
-      if (block && typeof block === "object") {
-        const id = getToolCallId(block as Record<string, unknown>);
-        if (id) return id;
-      }
-    }
-    const value = obj.toolCallId ?? obj.tool_call_id ?? obj.callId ?? obj.call_id ?? obj.id ?? obj.toolCallID;
-    return typeof value === "string" && value.length > 0 ? value : undefined;
-  };
-
-  const getToolName = (obj: Record<string, unknown>): string | undefined => {
-    if (typeof obj.toolCall === "object" && obj.toolCall != null) {
-      const name = getToolName(obj.toolCall as Record<string, unknown>);
-      if (name) return name;
-    }
-    if (typeof obj.data === "object" && obj.data != null) {
-      const name = getToolName(obj.data as Record<string, unknown>);
-      if (name) return name;
-    }
-    if (
-      typeof obj.partial === "object" &&
-      obj.partial != null &&
-      Array.isArray((obj.partial as { content?: unknown[] }).content)
-    ) {
-      const content = (obj.partial as { content: unknown[] }).content;
-      const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
-      const block = content[idx];
-      if (block && typeof block === "object") {
-        const name = getToolName(block as Record<string, unknown>);
-        if (name) return name;
-      }
-    }
-    const value = obj.name ?? obj.tool ?? obj.toolName ?? obj.tool_name ?? obj.function;
-    return typeof value === "string" && value.length > 0 ? value : undefined;
-  };
-
   const emitToolPart = (toolCallId: string, tool: string|undefined, state: ToolPartState) => {
     ensureStarted();
     finalizeCurrentPart();
@@ -571,11 +584,18 @@ export function createEventHandler(
       toolParts.set(toolCallId, { tool: validTool ?? "tool", state });
     }
     const entryRef = toolParts.get(toolCallId);
+    const effectiveTool = entryRef && entryRef.tool !== "tool" ? entryRef.tool : (validTool ?? "tool");
+    if (state.input) {
+      state.input = normalizeToolInput(effectiveTool, state.input);
+    }
+    if (state.output !== undefined) {
+      state.output = normalizeToolOutput(effectiveTool, state.output);
+    }
     emitMessagePartUpdated(openCodeId, {
       id: toolCallId,
       type: "tool",
       callID: toolCallId,
-      tool: entryRef && entryRef.tool !== "tool" ? entryRef.tool : (validTool ?? "tool"),
+      tool: effectiveTool,
       state,
       messageID: mid,
       sessionID: openCodeId,
@@ -670,8 +690,9 @@ export function createEventHandler(
         const toolCallId = getToolCallId(payload) ?? getToolCallId(event) ?? `tool_${randomUUID().replace(/-/g, "")}`;
         const tool = getToolName(payload) ?? getToolName(event);
         const existing = toolParts.get(toolCallId);
-        const state = reduceToolPartState(existing?.state, { type: customType, ...payload }, Date.now());
-        emitToolPart(toolCallId, tool, state);
+        const resolvedTool = tool ?? existing?.tool;
+        const state = reduceToolPartState(existing?.state, { type: customType, ...payload }, Date.now(), resolvedTool);
+        emitToolPart(toolCallId, resolvedTool, state);
         return;
       }
     }
@@ -683,8 +704,9 @@ export function createEventHandler(
       const toolCallId = getToolCallId(payload) ?? `tool_${randomUUID().replace(/-/g, "")}`;
       const tool = getToolName(payload);
       const existing = toolParts.get(toolCallId);
-      const state = reduceToolPartState(existing?.state, payload, Date.now());
-      emitToolPart(toolCallId, tool, state);
+      const resolvedTool = tool ?? existing?.tool;
+      const state = reduceToolPartState(existing?.state, payload, Date.now(), resolvedTool);
+      emitToolPart(toolCallId, resolvedTool, state);
       return;
     }
 
@@ -727,8 +749,9 @@ export function createEventHandler(
       const toolCallId = getToolCallId(assistantMessageEvent) ?? `tool_${randomUUID().replace(/-/g, "")}`;
       const tool = getToolName(assistantMessageEvent);
       const existing = toolParts.get(toolCallId);
-      const state = reduceToolPartState(existing?.state, assistantMessageEvent, Date.now());
-      emitToolPart(toolCallId, tool, state);
+      const resolvedTool = tool ?? existing?.tool;
+      const state = reduceToolPartState(existing?.state, assistantMessageEvent, Date.now(), resolvedTool);
+      emitToolPart(toolCallId, resolvedTool, state);
       return;
     }
   };
