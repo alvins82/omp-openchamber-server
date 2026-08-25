@@ -23,10 +23,22 @@ function agentEnd(): OmpRpcEvent {
 }
 
 interface MsgInfo { id: string; role: string; finish?: string; }
-interface Part { id: string; type: string; text?: string;
-  tool?: string; messageID: string; sessionID: string;
-  state?: { status: string; input?: unknown;
-           output?: string; error?: string }; }
+interface Part {
+  id: string;
+  type: string;
+  text?: string;
+  tool?: string;
+  messageID: string;
+  sessionID: string;
+  time?: { start: number; end?: number };
+  state?: {
+    status: string;
+    input?: unknown;
+    output?: string;
+    error?: string;
+    time?: { start: number; end?: number };
+  };
+}
 
 let got: OpenCodeEvent[] = [];
 let done = 0;
@@ -90,24 +102,59 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(done).toBe(1);
   });
 
-  it("thinking then text splits into ordered reasoning and text parts", () => {
+  it("thinking then text splits into ordered reasoning and text parts and finalizes reasoning with time.end", () => {
     runTurn([thinkDelta("why"), textDelta("because"), agentEnd()]);
-    expect(got).toHaveLength(4);
+    expect(got).toHaveLength(5);
     expect(got.map((e) => e.type)).toEqual([
       "message.updated",
       "message.part.updated",
       "message.part.updated",
+      "message.part.updated",
       "message.updated",
     ]);
-    const p1 = partOf(1);
-    const p2 = partOf(2);
-    expect(p1.type).toBe("reasoning");
-    expect(p1.text).toBe("why");
+    const p1Start = partOf(1);
+    const p1End = partOf(2);
+    const p2 = partOf(3);
+    expect(p1Start.type).toBe("reasoning");
+    expect(p1Start.text).toBe("why");
+    expect(p1Start.time?.start).toBeTypeOf("number");
+    expect(p1Start.time?.end).toBeUndefined();
+
+    expect(p1End.type).toBe("reasoning");
+    expect(p1End.text).toBe("why");
+    expect(p1End.time?.start).toBeTypeOf("number");
+    expect(p1End.time?.end).toBeTypeOf("number");
+
     expect(p2.type).toBe("text");
     expect(p2.text).toBe("because");
     const mid = infoOf(0).id;
-    expect(p1.id).toBe("part_" + SES + "_" + mid + "_1");
+    expect(p1Start.id).toBe("part_" + SES + "_" + mid + "_1");
+    expect(p1End.id).toBe("part_" + SES + "_" + mid + "_1");
     expect(p2.id).toBe("part_" + SES + "_" + mid + "_2");
+    expect(done).toBe(1);
+  });
+
+  it("reasoning followed by tool execution finalizes reasoning with time.end", () => {
+    runTurn([
+      thinkDelta("planning bash command"),
+      toolEvent("tool_execution_start", { toolCallId: "c1", tool: "bash", arguments: "{}" }),
+      toolEvent("tool_execution_end", { toolCallId: "c1", output: "ok" }),
+      thinkDelta("reviewing output"),
+      textDelta("done!"),
+      agentEnd(),
+    ]);
+    const reasoningParts = got
+      .filter((e) => e.type === "message.part.updated")
+      .map((e) => (e.properties as { part: Part }).part)
+      .filter((p) => p.type === "reasoning");
+
+    expect(reasoningParts.length).toBe(4); // 2 starts, 2 completions
+    const block1End = reasoningParts[1];
+    const block2End = reasoningParts[3];
+    expect(block1End.text).toBe("planning bash command");
+    expect(block1End.time?.end).toBeTypeOf("number");
+    expect(block2End.text).toBe("reviewing output");
+    expect(block2End.time?.end).toBeTypeOf("number");
     expect(done).toBe(1);
   });
 

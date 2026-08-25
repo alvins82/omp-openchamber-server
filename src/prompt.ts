@@ -204,6 +204,7 @@ function emitAssistantPart(
   text: string,
   directory?: string,
   startTime?: number,
+  endTime?: number,
 ): void {
   emitMessagePartUpdated(
     openCodeId,
@@ -211,7 +212,7 @@ function emitAssistantPart(
       id: partID,
       type: partType,
       text,
-      time: { start: startTime ?? Date.now() },
+      time: { start: startTime ?? Date.now(), end: endTime },
       messageID,
       sessionID: openCodeId,
     },
@@ -379,6 +380,9 @@ export function createEventHandler(
   let assistantMessageID: string | undefined;
   let assistantStartTime: number | undefined;
   let currentPartType: "text" | "reasoning" | undefined;
+  let activePartId: string | undefined;
+  let activePartStartTime: number | undefined;
+  let activePartText = "";
   let partIndex = 0;
   let hasStarted = false;
 
@@ -390,6 +394,27 @@ export function createEventHandler(
     assistantStartTime = Date.now();
     assistantMessageID = makeMessageId(openCodeId, `assistant_${assistantStartTime}`);
     emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, undefined, cwd, assistantStartTime);
+  };
+
+  const finalizeCurrentPart = () => {
+    if (!currentPartType || !activePartId || !assistantMessageID) return;
+    if (currentPartType === "reasoning") {
+      const now = Date.now();
+      emitAssistantPart(
+        openCodeId,
+        assistantMessageID,
+        activePartId,
+        "reasoning",
+        activePartText,
+        cwd,
+        activePartStartTime ?? now,
+        now,
+      );
+    }
+    currentPartType = undefined;
+    activePartId = undefined;
+    activePartStartTime = undefined;
+    activePartText = "";
   };
 
   const getToolCallId = (obj: Record<string, unknown>): string | undefined => {
@@ -446,7 +471,7 @@ export function createEventHandler(
 
   const emitToolPart = (toolCallId: string, tool: string|undefined, state: ToolPartState) => {
     ensureStarted();
-    currentPartType = undefined;
+    finalizeCurrentPart();
     const mid = assistantMessageID!;
     const entry = toolParts.get(toolCallId);
     const validTool = tool && tool !== "tool" ? tool : undefined;
@@ -476,6 +501,7 @@ export function createEventHandler(
       (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
       (type === "prompt_result" && event.agentInvoked === false)
     ) {
+      finalizeCurrentPart();
       if (assistantMessageID) {
         emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
       }
@@ -484,6 +510,7 @@ export function createEventHandler(
     }
 
     if (type === "extension_ui_request") {
+      finalizeCurrentPart();
       const reqId = String(event.id ?? randomUUID());
       const method = String(event.method ?? "confirm");
       const title = String(event.title ?? "");
@@ -586,11 +613,18 @@ export function createEventHandler(
       const mid = assistantMessageID!;
       const partType = eventType === "thinking_delta" ? "reasoning" : "text";
       if (currentPartType !== partType) {
+        finalizeCurrentPart();
         partIndex++;
         currentPartType = partType;
-        emitAssistantPart(openCodeId, mid, makePartId(openCodeId, mid, partIndex), partType, deltaText, cwd);
-      } else if (deltaText) {
-        emitMessagePartDelta(openCodeId, mid, makePartId(openCodeId, mid, partIndex), deltaText, cwd);
+        activePartId = makePartId(openCodeId, mid, partIndex);
+        activePartStartTime = Date.now();
+        activePartText = deltaText;
+        emitAssistantPart(openCodeId, mid, activePartId, partType, deltaText, cwd, activePartStartTime);
+      } else {
+        if (deltaText) {
+          activePartText += deltaText;
+          emitMessagePartDelta(openCodeId, mid, activePartId ?? makePartId(openCodeId, mid, partIndex), deltaText, cwd);
+        }
       }
       return;
     }
@@ -600,7 +634,7 @@ export function createEventHandler(
       (eventType.startsWith("toolcall_") || eventType === "toolCall" || eventType === "tool_call")
     ) {
       ensureStarted();
-      currentPartType = undefined;
+      finalizeCurrentPart();
       const toolCallId = getToolCallId(assistantMessageEvent) ?? `tool_${randomUUID().replace(/-/g, "")}`;
       const tool = getToolName(assistantMessageEvent);
       const existing = toolParts.get(toolCallId);
