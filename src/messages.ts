@@ -33,6 +33,7 @@ export interface OpenCodeTextPart {
   id: string;
   type: "text" | "reasoning";
   text: string;
+  time?: { start: number; end?: number };
   messageID: string;
   sessionID: string;
 }
@@ -233,10 +234,12 @@ function buildParts(
 
   const flushText = () => {
     if (currentTextPart) {
+      const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
       parts.push({
         id: `part_${openCodeId}_${messageId}_${parts.length}`,
         type: currentTextPart.type,
         text: currentTextPart.text || "(empty)",
+        time: { start: msgTime, end: msgTime },
         messageID: messageId,
         sessionID: openCodeId,
       });
@@ -284,10 +287,12 @@ function buildParts(
   flushText();
 
   if (parts.length === 0) {
+    const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
     parts.push({
       id: `part_${openCodeId}_${messageId}_0`,
       type: "text",
       text: "(empty)",
+      time: { start: msgTime, end: msgTime },
       messageID: messageId,
       sessionID: openCodeId,
     });

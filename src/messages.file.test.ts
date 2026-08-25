@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadMessagesFromFile } from "./messages";
+import { loadMessagesFromFile, type OpenCodeTextPart } from "./messages";
 
 const SID = "01234567-89ab-cdef-0123-456789abcdef";
 const TMP = mkdtempSync(join(tmpdir(), "msgfile-test-"));
@@ -147,6 +147,14 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out![0].parts.map((x) => x.type)).toEqual([
       "reasoning", "text",
     ]);
+    expect((out![0].parts[0] as OpenCodeTextPart).time).toEqual({
+      start: 1755927609000,
+      end: 1755927609000,
+    });
+    expect((out![0].parts[1] as OpenCodeTextPart).time).toEqual({
+      start: 1755927609000,
+      end: 1755927609000,
+    });
   });
 
   it("skips a truncated final line instead of throwing", async () => {
