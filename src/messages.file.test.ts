@@ -256,5 +256,48 @@ expect(p1.text).toBe("(empty)");
     expect(out![1].info.parentID).toBe("msg_019_go");
     expect(out![1].info.role).toBe("assistant");
   });
+
+  it("normalizes glob tool input and empty result when loading from file", async () => {
+    const globSid = "sess-glob-test-uuid";
+    const path = fileFor("glob-session.jsonl", [
+      userMsg("u1", "Find files", 1755927600000),
+      asstMsg("a1", [
+        {
+          type: "toolCall",
+          id: "call_glob_1",
+          name: "glob",
+          arguments: {
+            path: "/Users/alvin/claude-cowork/hangar/**",
+            l: "Finding existing files in hangar",
+            description: "Finding existing files in hangar",
+          },
+        },
+      ], 1755927605000),
+      {
+        type: "message",
+        id: "r1",
+        timestamp: "2026-08-23T00:00:06.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_glob_1",
+          toolName: "glob",
+          content: "No files found matching pattern",
+          timestamp: 1755927606000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, globSid, TEST_DB);
+    expect(out).toHaveLength(2);
+    const toolPart = out![1].parts[0] as { type: string; tool: string; state: { input: Record<string, unknown>; output: string; status: string } };
+    expect(toolPart.type).toBe("tool");
+    expect(toolPart.tool).toBe("glob");
+    expect(toolPart.state.status).toBe("completed");
+    expect(toolPart.state.input).toEqual({
+      path: "/Users/alvin/claude-cowork/hangar",
+      pattern: "**",
+    });
+    expect(toolPart.state.output).toBe("");
+  });
 });
 
