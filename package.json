@@ -2,7 +2,13 @@
   "name": "omp-openchamber-server",
   "version": "0.1.0",
   "description": "OpenCode HTTP API proxy bridging OpenChamber to oh-my-pi (omp) RPC",
-  "repository": "https://github.com/alvins82/omp-openchamber-server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alvins82/omp-openchamber-server.git"
+  },
+  "homepage": "https://github.com/alvins82/omp-openchamber-server#readme",
+  "license": "MIT",
+  "author": "Alvin",
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
