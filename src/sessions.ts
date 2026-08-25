@@ -8,6 +8,12 @@ import {
   parseTitleSlotLine,
   serializeTitleSlot,
 } from "./title";
+import {
+  deleteIndexedTitle,
+  lookupIndexedTitle,
+  recordIndexedTitle,
+  searchMatchingSessionIds,
+} from "./title-db";
 import { emitSessionUpdated } from "./sse";
 
 function ompSessionsRoot(): string {
@@ -162,7 +168,12 @@ export async function readSessionHeader(
       } catch { /* skip malformed JSON */ }
     }
 
-    if (latestTitle !== undefined) header.title = latestTitle;
+    if (latestTitle !== undefined) {
+      header.title = latestTitle;
+    } else if (!header.title) {
+      const indexed = lookupIndexedTitle(header.id);
+      if (indexed) header.title = indexed;
+    }
     if (firstUserPrompt !== undefined) header.firstUserPrompt = firstUserPrompt;
     if (latestMetadata !== undefined) header.metadata = latestMetadata;
     if (latestArchived !== undefined) header.archived = latestArchived;
@@ -250,6 +261,9 @@ export async function createOmpSession(
   };
 
   await Bun.write(filePath, titleSlot + JSON.stringify(headerRecord) + "\n");
+  if (options?.title) {
+    recordIndexedTitle(uuid, options.title);
+  }
   return buildOpenCodeSession(
     {
       id: uuid,
@@ -269,6 +283,7 @@ export async function deleteOmpSession(
   const session = (await getOmpSessionByOpenCodeId(openCodeId, directory)) || (await getOmpSessionByOpenCodeId(openCodeId));
   if (!session) return false;
   try {
+    deleteIndexedTitle(fromOpenCodeSessionId(openCodeId));
     await unlink(session.path);
     return true;
   } catch {
@@ -294,6 +309,7 @@ export async function setOmpSessionTitle(
       updatedAt: new Date().toISOString(),
     });
     await Bun.write(session.path, updatedContent);
+    recordIndexedTitle(fromOpenCodeSessionId(openCodeId), cleanTitle);
 
     session.title = cleanTitle;
     session.time.updated = Date.now();
@@ -360,11 +376,14 @@ export async function updateOmpSession(
 
 export async function listOmpSessions(
   directory?: string | null,
-  options?: { all?: boolean; limit?: number; archived?: boolean },
+  options?: { all?: boolean; limit?: number; archived?: boolean; search?: string },
 ): Promise<OpenCodeSession[]> {
   const all = options?.all ?? false;
   const limit = options?.limit;
   const archived = options?.archived;
+  const search = options?.search?.trim();
+  const searchLower = search ? search.toLowerCase() : undefined;
+  const matchingOmpIds = search ? searchMatchingSessionIds(search) : undefined;
   const sessions: OpenCodeSession[] = [];
 
   let entries: { name: string; isDirectory(): boolean }[];
@@ -397,6 +416,17 @@ export async function listOmpSessions(
       if (!header) continue;
       if (!all && header.cwd !== directory) continue;
       if (archived !== true && !!header.archived) continue;
+
+      if (searchLower) {
+        const titleMatch = header.title?.toLowerCase().includes(searchLower);
+        const promptMatch = header.firstUserPrompt?.toLowerCase().includes(searchLower);
+        const idMatch = header.id.toLowerCase().includes(searchLower);
+        const cwdMatch = header.cwd.toLowerCase().includes(searchLower);
+        const ftsMatch = matchingOmpIds?.has(header.id);
+        if (!titleMatch && !promptMatch && !idMatch && !cwdMatch && !ftsMatch) {
+          continue;
+        }
+      }
 
       sessions.push(await buildOpenCodeSession(header, filePath));
       if (limit !== undefined && sessions.length >= limit) break;

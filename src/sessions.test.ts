@@ -174,6 +174,17 @@ describe("listOmpSessions (Tier A3, fake HOME)", () => {
       await updateOmpSession("ses_" + HEXA, { time: { archived: 0 } });
     }
   });
+
+  it("filters sessions by search query (title / prompt / id / cwd)", async () => {
+    const matchedAlpha = await listOmpSessions(null, { all: true, search: "Alpha" });
+    expect(matchedAlpha.map((s) => s.id)).toEqual(["ses_" + HEXA]);
+
+    const matchedCwd = await listOmpSessions(null, { all: true, search: "elsewhere" });
+    expect(matchedCwd.map((s) => s.id)).toEqual(["ses_" + HEXB]);
+
+    const nonMatch = await listOmpSessions(null, { all: true, search: "nonexistentquery123" });
+    expect(nonMatch).toHaveLength(0);
+  });
 });
 
 describe("getOmpSessionByOpenCodeId (Tier A3, fake HOME)", () => {

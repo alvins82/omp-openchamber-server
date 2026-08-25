@@ -5,6 +5,7 @@ import {
   deleteOmpSession,
   updateOmpSession,
 } from "./sessions";
+import { listAvailableCommands, listAvailableSkills } from "./discovery";
 import { loadSessionMessages } from "./messages";
 import {
   createOpenCodeEventStream,
@@ -553,16 +554,6 @@ const server = Bun.serve({
         });
       }
 
-      // Session list
-      if (p === "/session" && req.method === "GET") {
-        try {
-          const sessions = await listOmpSessions(dir);
-          return json(sessions);
-        } catch (err) {
-          return jsonError(err instanceof Error ? err.message : "list failed", 500);
-        }
-      }
-
       // Create session (POST /session)
       if (p === "/session" && req.method === "POST") {
         try {
@@ -582,11 +573,13 @@ const server = Bun.serve({
           const archivedParam = url.searchParams.get("archived");
           const archived = archivedParam === "true" ? true : archivedParam === "false" ? false : undefined;
           const limit = url.searchParams.get("limit");
+          const search = url.searchParams.get("search") || url.searchParams.get("query") || url.searchParams.get("q") || undefined;
           const all = roots || url.searchParams.get("all") === "true" || !dir;
           const sessions = await listOmpSessions(all ? null : dir, {
             all,
             archived,
             limit: limit != null ? parseInt(limit, 10) : undefined,
+            search,
           });
           return json(sessions);
         } catch (err) {
@@ -594,17 +587,20 @@ const server = Bun.serve({
         }
       }
 
+      // Session list (GET /session)
       if (p === "/session" && req.method === "GET") {
         try {
           const roots = url.searchParams.get("roots") === "true";
           const archivedParam = url.searchParams.get("archived");
           const archived = archivedParam === "true" ? true : archivedParam === "false" ? false : undefined;
           const limit = url.searchParams.get("limit");
+          const search = url.searchParams.get("search") || url.searchParams.get("query") || url.searchParams.get("q") || undefined;
           const all = roots || url.searchParams.get("all") === "true";
           const sessions = await listOmpSessions(all ? null : dir, {
             all,
             archived,
             limit: limit != null ? parseInt(limit, 10) : undefined,
+            search,
           });
           return json(sessions);
         } catch (err) {
@@ -1021,15 +1017,15 @@ const server = Bun.serve({
 
     // Commands
     if (p === "/command" && req.method === "GET") {
-      return json([
-        { name: "help", description: "Show available commands", template: "/help" },
-        { name: "compact", description: "Compact session history", template: "/compact" },
-        { name: "clear", description: "Clear current session context", template: "/clear" },
-      ]);
+      const cmds = await listAvailableCommands(dir);
+      return json(cmds);
     }
 
     // Skill
-    if (p === "/skill" && req.method === "GET") return json([]);
+    if (p === "/skill" && req.method === "GET") {
+      const skills = await listAvailableSkills(dir);
+      return json(skills);
+    }
 
     // MCP
     if (p === "/mcp" && req.method === "GET") return json({});
