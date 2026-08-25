@@ -24,13 +24,18 @@ bun run start
 
 #### Option A: Via OpenChamber UI (Recommended)
 
-1. Open OpenChamber and go to **Settings** → **Remote Instances** (or click the instance switcher in the top bar and select **+ Add instance**).
-2. Click **+ Add server** and fill in the details:
-   - **Label (optional)**: `OMP Server`
-   - **URL**: `http://127.0.0.1:4096`
-   - **Connection token**: *(leave blank for local servers)*
-   - Click **Add server**.
-3. Verify the status indicator turns green (`● Connected`). Star or select **OMP Server** as your active instance. All existing oh-my-pi sessions will appear in the sidebar!
+1. **Open Remote Instances**:
+   - Go to **Settings** → **Remote Instances** (or click the instance menu in the top-right corner and choose **+ Add instance**).
+2. **Add Server**:
+   - Click **+ Add server** and configure:
+     - **Label (optional)**: `OMP Server`
+     - **URL**: `http://127.0.0.1:4096`
+     - **Connection token**: *(leave blank for local servers)*
+     - Click **Add server**.
+3. **Switch & Select Instance**:
+   - Click the server instance switcher in the **top-right corner** of OpenChamber (e.g. `OMP Server` or `Local`).
+   - Select **OMP Server** (`● Connected`) and star it as default.
+   - All your oh-my-pi sessions will appear in the sidebar, and your prompts will be driven by `omp`!
 
 #### Option B: Via CLI Environment Variables
 
