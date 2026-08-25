@@ -2,28 +2,44 @@
 
 Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my-pi](https://github.com/can1357/oh-my-pi) coding sessions — without modifying either project.
 
-## Usage
+## Quick Start
 
-### Prerequisites
+### 1. Prerequisites
 
-- `omp` on `PATH`
-- `openchamber` on `PATH` (typically `~/.bun/bin/openchamber`)
-- `bun install` in this repo
+- [`omp`](https://github.com/can1357/oh-my-pi) on `PATH`
+- [OpenChamber](https://github.com/OpenChamber/OpenChamber) installed or running
+- [Bun](https://bun.sh) runtime
 
-### Run
+### 2. Start the Proxy Server
 
 ```bash
-# Terminal 1 — start the proxy server
+bun install
 bun run start
 # → [proxy] listening on http://127.0.0.1:4096
+```
 
-# Terminal 2 — start OpenChamber pointing at the proxy
+### 3. Connect to OpenChamber
+
+![How to add OMP Server to OpenChamber](./assets/openchamber-add-server.gif)
+
+#### Option A: Via OpenChamber UI (Recommended)
+
+1. Open OpenChamber and go to **Settings** → **Remote Instances** (or click the instance switcher in the top bar and select **+ Add instance**).
+2. Click **+ Add server** and fill in the details:
+   - **Label (optional)**: `OMP Server`
+   - **URL**: `http://127.0.0.1:4096`
+   - **Connection token**: *(leave blank for local servers)*
+   - Click **Add server**.
+3. Verify the status indicator turns green (`● Connected`). Star or select **OMP Server** as your active instance. All existing oh-my-pi sessions will appear in the sidebar!
+
+#### Option B: Via CLI Environment Variables
+
+```bash
 OPENCODE_HOST=http://127.0.0.1:4096 \
   OPENCODE_SKIP_START=true \
   openchamber serve --foreground --port 3000
 ```
-
-Open `http://127.0.0.1:3000/`. Add a project directory matching one of your omp session roots; sessions appear in the sidebar.
+Open `http://127.0.0.1:3000/` in your browser.
 
 ### Verify
 
