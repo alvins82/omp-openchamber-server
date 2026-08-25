@@ -48,7 +48,7 @@ bun run test:live
 ### Test tiers
 
 - **Tier A/B** (`bun test`): contract, sequence, sessions, and HTTP integration tests driven by `test/mock-omp.mjs` (a deterministic stand-in speaking the real OMP RPC dialect). Always green; no network, no provider.
-- **Tier C** (`bun run test:live` → `src/integration.live.test.ts`): end-to-end against the real `omp` binary. Auto-skips when the `omp` binary or a reachable provider is missing, so the default `bun test` costs zero. Requires: `omp` on `PATH`, a working provider in `~/.omp/agent/models.yml` (in this environment: `llama.cpp` / `qwen3.8-27b` on a local vLLM), and a few minutes — it creates a scratch session, runs real turns, and asserts the exact OpenCode event vocabulary, message persistence shapes, busy-lock `409`, and abort semantics. Verified green (see `docs/contract-diff.md`, "Tier C result").
+- **Tier C** (`bun run test:live` → `src/integration.live.test.ts`): end-to-end against the real `omp` binary. Auto-skips when the `omp` binary or a reachable provider is missing, so the default `bun test` costs zero. Requires: `omp` on `PATH` and a reachable model provider in `~/.omp/agent/models.yml`. It creates a scratch session, runs real turns, and asserts the exact OpenCode event vocabulary, message persistence shapes, busy-lock `409`, and abort semantics.
 
 ## Design
 
@@ -87,11 +87,7 @@ Embedded-OMP resilience (`src/rpc.ts`): the spawned OMP instance is hardened so 
 
 Comprehensive design specifications and protocol analyses are available in [`docs/`](./docs):
 
-- [`contract-diff.md`](./docs/contract-diff.md) — Detailed comparison of OpenCode contract vs OMP proxy implementation.
-- [`omp-protocol-notes.md`](./docs/omp-protocol-notes.md) — Protocol specifications, frame formats, and lifecycle events for oh-my-pi RPC.
-- [`gap-map.md`](./docs/gap-map.md) — Complete gap analysis and resolution matrix.
-- [`phase0-report.md`](./docs/phase0-report.md) — Initial findings, architectural decisions, and prototype results.
-- [`omp-capabilities.md`](./docs/omp-capabilities.md) — Breakdown of OMP features and capabilities.
-- [`sidecar-coverage.md`](./docs/sidecar-coverage.md) — Endpoint mapping and coverage verification.
-- [`oc-usage.md`](./docs/oc-usage.md) — OpenChamber frontend expectations and event contracts.
-- [`sdk-contract.md`](./docs/sdk-contract.md) — OpenCode SDK data structures and type contracts.
+- [`architecture.md`](./docs/architecture.md) — Subsystem architecture, process management, JSONL fast path, and core invariants.
+- [`api-reference.md`](./docs/api-reference.md) — Complete OpenCode HTTP and SSE endpoint reference with request/response schemas.
+- [`omp-protocol.md`](./docs/omp-protocol.md) — oh-my-pi stdio NDJSON RPC protocol, commands, turn events, and disk schemas.
+- [`openchamber-contract.md`](./docs/openchamber-contract.md) — OpenChamber SSE stream lifecycle, message/part schemas, and UI reducer contracts.
