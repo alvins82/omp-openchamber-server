@@ -206,6 +206,37 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(done).toBe(1);
   });
 
+  it("tool execution with partial stream metadata and block array output isolates input and unboxes text", () => {
+    runTurn([
+      toolEvent("tool_execution_start", {
+        toolCallId: "c3",
+        tool: "todo",
+        arguments: { task: "Unblock commit 2 task" },
+      }),
+      toolEvent("tool_execution_end", {
+        toolCallId: "c3",
+        tool: "todo",
+        contentIndex: 4,
+        partial: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "internal thought" }],
+        },
+        result: [{ type: "text", text: "Remaining items (2): - Commit 1: Rust + docs" }],
+      }),
+      agentEnd(),
+    ]);
+
+    expect(got).toHaveLength(4);
+    expect(partOf(1).state?.status).toBe("running");
+    expect(partOf(1).state?.input).toEqual({ task: "Unblock commit 2 task" });
+
+    expect(partOf(2).state?.status).toBe("completed");
+    expect(partOf(2).state?.input).toEqual({ task: "Unblock commit 2 task" });
+    expect(partOf(2).state?.output).toBe("Remaining items (2): - Commit 1: Rust + docs");
+    expect(infoOf(3).finish).toBe("stop");
+    expect(done).toBe(1);
+  });
+
   it("P11 failturn: agent_end with no assistant output emits nothing", () => {
     expect(runTurn([agentEnd()])).toBe(1);
     expect(got).toHaveLength(0);

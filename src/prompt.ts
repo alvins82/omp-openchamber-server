@@ -228,10 +228,27 @@ export interface ToolPartState {
   time?: { start: number; end?: number };
 }
 
-function parseToolInput(value: unknown): Record<string, unknown> | undefined {
+function isRpcEventFrame(obj: Record<string, unknown>): boolean {
+  if (typeof obj.type === "string" && (
+    obj.type.startsWith("tool_execution_") ||
+    obj.type.startsWith("toolcall_") ||
+    obj.type === "message_update" ||
+    obj.type === "message_start" ||
+    obj.type === "message_end" ||
+    obj.type === "agent_start" ||
+    obj.type === "agent_end" ||
+    obj.type === "turn_start" ||
+    obj.type === "turn_end" ||
+    obj.type === "custom"
+  )) return true;
+  if (typeof obj.customType === "string") return true;
+  if ("partial" in obj || "contentIndex" in obj) return true;
+  return false;
+}
+
+function parseToolInput(value: unknown, descriptionHint?: string): Record<string, unknown> | undefined {
   if (value == null) return undefined;
   let parsed: Record<string, unknown> | undefined;
-  let descriptionHint: string | undefined;
 
   if (typeof value === "object" && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
@@ -242,37 +259,36 @@ function parseToolInput(value: unknown): Record<string, unknown> | undefined {
 
     if (obj.toolCall && typeof obj.toolCall === "object") {
       const tc = obj.toolCall as Record<string, unknown>;
-      const inner = parseToolInput(tc.arguments ?? tc.args ?? tc.input);
-      if (inner) {
-        if (!inner.description && descriptionHint) inner.description = descriptionHint;
-        return inner;
-      }
+      const inner = parseToolInput(tc.arguments ?? tc.args ?? tc.input, descriptionHint);
+      if (inner) return inner;
     }
     if (obj.data && typeof obj.data === "object") {
       const d = obj.data as Record<string, unknown>;
-      const inner = parseToolInput(d.args ?? d.arguments ?? d.input ?? d.parameters);
-      if (inner) {
-        if (!inner.description && descriptionHint) inner.description = descriptionHint;
-        return inner;
-      }
+      const inner = parseToolInput(d.args ?? d.arguments ?? d.input ?? d.parameters, descriptionHint);
+      if (inner) return inner;
     }
     if (obj.args || obj.arguments || obj.input || obj.parameters || obj.params) {
       const innerObj = obj.args ?? obj.arguments ?? obj.input ?? obj.parameters ?? obj.params;
-      const inner = parseToolInput(innerObj);
-      if (inner) {
-        if (!inner.description && descriptionHint) inner.description = descriptionHint;
-        return inner;
-      }
+      const inner = parseToolInput(innerObj, descriptionHint);
+      if (inner) return inner;
     }
+
+    if (isRpcEventFrame(obj)) {
+      return undefined;
+    }
+
     parsed = { ...obj };
   } else if (typeof value === "string") {
     try {
       const p = JSON.parse(value);
       if (p != null && typeof p === "object" && !Array.isArray(p)) {
-        parsed = p as Record<string, unknown>;
+        if (!isRpcEventFrame(p as Record<string, unknown>)) {
+          parsed = p as Record<string, unknown>;
+        }
       }
     } catch { /* ignore */ }
   }
+
   if (parsed) {
     if (!parsed.description && (parsed.intent || parsed.i || descriptionHint)) {
       parsed.description = (parsed.intent ?? parsed.i ?? descriptionHint) as string;
@@ -283,18 +299,59 @@ function parseToolInput(value: unknown): Record<string, unknown> | undefined {
 
 function formatToolOutput(value: unknown): string | undefined {
   if (value == null) return undefined;
+  if (typeof value === "string") return value;
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "";
+
+    const isContentBlockArray = value.every(
+      (item) =>
+        item != null &&
+        typeof item === "object" &&
+        !Array.isArray(item) &&
+        (("type" in item && (item.type === "text" || item.type === "thinking" || item.type === "tool_result" || item.type === "image")) ||
+         ("text" in item && typeof (item as Record<string, unknown>).text === "string" && !("status" in item && "content" in item)))
+    );
+
+    if (isContentBlockArray) {
+      return value
+        .map((block) => {
+          if (!block || typeof block !== "object") return String(block);
+          const b = block as Record<string, unknown>;
+          if (typeof b.text === "string") return b.text;
+          if (typeof b.thinking === "string") return b.thinking;
+          if (typeof b.content === "string") return b.content;
+          if (typeof b.output === "string") return b.output;
+          return JSON.stringify(block);
+        })
+        .join("\n");
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
   if (typeof value === "object" && value !== null) {
     const obj = value as Record<string, unknown>;
     if (obj.data && typeof obj.data === "object") {
       const d = obj.data as Record<string, unknown>;
-      return formatToolOutput(d.result ?? d.output ?? d.partialResult ?? d.partial_result);
+      return formatToolOutput(d.result ?? d.output ?? d.partialResult ?? d.partial_result ?? d.content);
     }
     if ("result" in obj || "partialResult" in obj || "partial_result" in obj || "output" in obj || "content" in obj) {
       const inner = obj.result ?? obj.partialResult ?? obj.partial_result ?? obj.output ?? obj.content;
       return formatToolOutput(inner);
     }
+    if (obj.type === "text" && typeof obj.text === "string") {
+      return obj.text;
+    }
+    if (typeof obj.text === "string" && Object.keys(obj).length === 1) {
+      return obj.text;
+    }
   }
-  if (typeof value === "string") return value;
+
   try {
     return JSON.stringify(value);
   } catch {
@@ -308,7 +365,9 @@ function getToolError(obj: Record<string, unknown>): string | undefined {
   if (typeof value === "string" && value.length > 0) return value;
   if (d.isError === true || d.is_error === true || d.error === true || obj.isError === true || obj.is_error === true || obj.error === true) {
     const detail = d.output ?? d.content ?? d.result ?? obj.output ?? obj.content ?? obj.result ?? "tool error";
-    return typeof detail === "string" ? detail : "tool error";
+    if (typeof detail === "string") return detail;
+    const formatted = formatToolOutput(detail);
+    return formatted ?? "tool error";
   }
   return undefined;
 }
@@ -322,7 +381,37 @@ export function reduceToolPartState(
   if (state.time) state.time = { ...state.time };
   const type = ((event.type ?? event.customType) as string) || "";
 
-  const input = parseToolInput(event.arguments ?? event.args ?? event.input ?? event.parameters ?? event.data ?? event);
+  const intentHint =
+    (typeof event.intent === "string" && event.intent.length > 0 ? event.intent : undefined) ??
+    (typeof event.i === "string" && event.i.length > 0 ? event.i : undefined) ??
+    (typeof event.data === "object" && event.data != null
+      ? (typeof (event.data as Record<string, unknown>).intent === "string" ? (event.data as Record<string, unknown>).intent as string : undefined) ??
+        (typeof (event.data as Record<string, unknown>).i === "string" ? (event.data as Record<string, unknown>).i as string : undefined)
+      : undefined) ??
+    (typeof event.toolCall === "object" && event.toolCall != null
+      ? (typeof (event.toolCall as Record<string, unknown>).intent === "string" ? (event.toolCall as Record<string, unknown>).intent as string : undefined) ??
+        (typeof (event.toolCall as Record<string, unknown>).i === "string" ? (event.toolCall as Record<string, unknown>).i as string : undefined)
+      : undefined);
+
+  const rawInput =
+    event.arguments ??
+    event.args ??
+    event.input ??
+    event.parameters ??
+    (typeof event.toolCall === "object" && event.toolCall != null
+      ? (event.toolCall as Record<string, unknown>).arguments ??
+        (event.toolCall as Record<string, unknown>).args ??
+        (event.toolCall as Record<string, unknown>).input ??
+        (event.toolCall as Record<string, unknown>).parameters
+      : undefined) ??
+    (typeof event.data === "object" && event.data != null
+      ? (event.data as Record<string, unknown>).args ??
+        (event.data as Record<string, unknown>).arguments ??
+        (event.data as Record<string, unknown>).input ??
+        (event.data as Record<string, unknown>).parameters
+      : undefined);
+
+  const input = rawInput != null ? parseToolInput(rawInput, intentHint) : undefined;
   if (input && Object.keys(input).length > 0) {
     state.input = { ...state.input, ...input };
   }
@@ -344,7 +433,7 @@ export function reduceToolPartState(
     if (state.status !== "completed" && state.status !== "error") {
       state.status = "running";
     }
-    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.partialResult ?? event.partial_result ?? event.data);
+    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.partialResult ?? event.partial_result ?? (typeof event.data === "object" && event.data != null ? event.data : undefined));
     if (output != null) {
       if (state.output && !output.startsWith(state.output)) {
         state.output = state.output + "\n" + output;
@@ -360,7 +449,7 @@ export function reduceToolPartState(
     } else {
       state.status = "completed";
     }
-    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.data);
+    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? (typeof event.data === "object" && event.data != null ? event.data : undefined));
     if (output != null) state.output = output;
     if (!state.time) state.time = { start: now };
     state.time.end = now;

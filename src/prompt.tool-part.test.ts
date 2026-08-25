@@ -146,5 +146,116 @@ describe("reduceToolPartState", () => {
     });
     expect(state.time).toEqual({ start: 1000 });
   });
+
+  it("tool_execution_end with partial and contentIndex does not leak RPC envelope into input", () => {
+    const current: ToolPartState = {
+      status: "running",
+      input: { task: "Unblock commit 2 task" },
+      time: { start: 1000 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        toolName: "todo",
+        contentIndex: 4,
+        partial: {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "User's response:\n1. Attribution...",
+            },
+          ],
+        },
+        result: [
+          {
+            type: "text",
+            text: "Remaining items (2): - Commit 1: Rust + docs",
+          },
+        ],
+      },
+      2000,
+    );
+
+    expect(state.status).toBe("completed");
+    expect(state.input).toEqual({ task: "Unblock commit 2 task" });
+    expect(state.output).toBe("Remaining items (2): - Commit 1: Rust + docs");
+    expect(state.time).toEqual({ start: 1000, end: 2000 });
+  });
+
+  it("unboxes array of content blocks into concatenated text output", () => {
+    const current: ToolPartState = {
+      status: "running",
+      input: { command: "summary" },
+      time: { start: 1000 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        output: [
+          { type: "text", text: "Part 1" },
+          { type: "text", text: "Part 2" },
+        ],
+      },
+      2000,
+    );
+
+    expect(state.status).toBe("completed");
+    expect(state.output).toBe("Part 1\nPart 2");
+  });
+
+  it("preserves structured OpenCode Todo item arrays as JSON for UI renderers", () => {
+    const todos = [
+      { id: "1", content: "Write tests", status: "in_progress", priority: "high" },
+      { id: "2", content: "Submit PR", status: "pending", priority: "medium" },
+    ];
+
+    const current: ToolPartState = {
+      status: "running",
+      input: { action: "list" },
+      time: { start: 1000 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        result: todos,
+      },
+      2000,
+    );
+
+    expect(state.status).toBe("completed");
+    expect(JSON.parse(state.output!)).toEqual(todos);
+  });
+
+  it("extracts error detail from content block array when isError is set", () => {
+    const current: ToolPartState = {
+      status: "running",
+      input: { path: "invalid.json" },
+      time: { start: 1000 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        isError: true,
+        result: [{ type: "text", text: "SyntaxError: Unexpected token" }],
+      },
+      2000,
+    );
+
+    expect(state.status).toBe("error");
+    expect(state.error).toBe("SyntaxError: Unexpected token");
+  });
 });
 
