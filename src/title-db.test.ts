@@ -129,4 +129,37 @@ describe("title-db (OMP v18 history.db session_titles)", () => {
     expect(ids.has("sess-uuid-auth")).toBe(true);
     expect(ids.has("sess-uuid-title-match")).toBe(true);
   });
+
+  test("persists and manages client message ID mappings in session_message_ids", () => {
+    const sId = "sess-msg-test-1";
+    const {
+      recordPersistedMessageId,
+      listPersistedMessageIds,
+      bindPersistedOmpMessageId,
+      deletePersistedMessageIds,
+    } = require("./title-db");
+
+    recordPersistedMessageId(sId, "msg_client_001", "Hello assistant", 1787600100, undefined, TEST_DB);
+    recordPersistedMessageId(sId, "msg_client_002", "Second prompt", 1787600200, undefined, TEST_DB);
+
+    const list = listPersistedMessageIds(sId, TEST_DB);
+    expect(list).toHaveLength(2);
+    expect(list[0].clientMessageId).toBe("msg_client_001");
+    expect(list[0].promptText).toBe("Hello assistant");
+    expect(list[0].createdAt).toBe(1787600100);
+    expect(list[0].ompMessageId).toBeUndefined();
+
+    expect(list[1].clientMessageId).toBe("msg_client_002");
+    expect(list[1].promptText).toBe("Second prompt");
+
+    // Bind OMP message ID
+    bindPersistedOmpMessageId(sId, "msg_client_001", "omp_m1_hex", TEST_DB);
+    const updatedList = listPersistedMessageIds(sId, TEST_DB);
+    expect(updatedList[0].ompMessageId).toBe("omp_m1_hex");
+
+    // Delete mappings
+    deletePersistedMessageIds(sId, TEST_DB);
+    expect(listPersistedMessageIds(sId, TEST_DB)).toHaveLength(0);
+  });
 });
+

@@ -8,7 +8,23 @@ CREATE TABLE IF NOT EXISTS session_titles (
 	title TEXT NOT NULL,
 	updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
+CREATE TABLE IF NOT EXISTS session_message_ids (
+	session_id TEXT NOT NULL,
+	client_message_id TEXT NOT NULL,
+	prompt_text TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	omp_message_id TEXT,
+	PRIMARY KEY (session_id, client_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_msg_ids_session ON session_message_ids(session_id);
 `;
+
+export interface PersistedMessageMapping {
+  clientMessageId: string;
+  promptText: string;
+  createdAt: number;
+  ompMessageId?: string;
+}
 
 interface TitleIndexHandle {
   dbPath: string;
@@ -17,6 +33,10 @@ interface TitleIndexHandle {
   select: Statement;
   deleteStmt: Statement;
   selectAll: Statement;
+  insertMessageId: Statement;
+  selectMessageIds: Statement;
+  bindOmpMessageId: Statement;
+  deleteMessageIds: Statement;
 }
 
 let handle: TitleIndexHandle | undefined;
@@ -34,6 +54,10 @@ export function closeTitleIndex(): void {
     handle.select.finalize();
     handle.deleteStmt.finalize();
     handle.selectAll.finalize();
+    handle.insertMessageId.finalize();
+    handle.selectMessageIds.finalize();
+    handle.bindOmpMessageId.finalize();
+    handle.deleteMessageIds.finalize();
     handle.db.close();
   } catch {
     /* ignore close errors */
@@ -68,6 +92,26 @@ export function openTitleIndex(overrideDbPath?: string): TitleIndexHandle | unde
       select: db.prepare("SELECT title FROM session_titles WHERE session_id = ?"),
       deleteStmt: db.prepare("DELETE FROM session_titles WHERE session_id = ?"),
       selectAll: db.prepare("SELECT session_id, title FROM session_titles"),
+      insertMessageId: db.prepare(`
+        INSERT INTO session_message_ids (session_id, client_message_id, prompt_text, created_at, omp_message_id)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, client_message_id) DO UPDATE SET
+          prompt_text = excluded.prompt_text,
+          created_at = excluded.created_at,
+          omp_message_id = COALESCE(excluded.omp_message_id, session_message_ids.omp_message_id)
+      `),
+      selectMessageIds: db.prepare(`
+        SELECT client_message_id, prompt_text, created_at, omp_message_id
+        FROM session_message_ids
+        WHERE session_id = ?
+        ORDER BY created_at ASC, rowid ASC
+      `),
+      bindOmpMessageId: db.prepare(`
+        UPDATE session_message_ids
+        SET omp_message_id = ?
+        WHERE session_id = ? AND client_message_id = ?
+      `),
+      deleteMessageIds: db.prepare("DELETE FROM session_message_ids WHERE session_id = ?"),
     };
     failedPath = undefined;
     return handle;
@@ -250,3 +294,88 @@ export function searchMatchingSessionIds(
 
   return result;
 }
+
+/**
+ * Record or update a client message ID mapping for a session.
+ * Best-effort: errors are swallowed.
+ */
+export function recordPersistedMessageId(
+  sessionId: string,
+  clientMessageId: string,
+  promptText: string,
+  createdAt?: number,
+  ompMessageId?: string,
+  dbPath?: string,
+): void {
+  if (!sessionId || !clientMessageId) return;
+  const index = openTitleIndex(dbPath);
+  if (!index) return;
+  try {
+    const ts = typeof createdAt === "number" && Number.isFinite(createdAt) ? createdAt : Date.now();
+    index.insertMessageId.run(sessionId, clientMessageId, promptText || "", ts, ompMessageId ?? null);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Return all recorded client message mappings for a session, ordered chronologically.
+ */
+export function listPersistedMessageIds(
+  sessionId: string,
+  dbPath?: string,
+): PersistedMessageMapping[] {
+  if (!sessionId) return [];
+  const index = openTitleIndex(dbPath);
+  if (!index) return [];
+  try {
+    const rows = index.selectMessageIds.all(sessionId) as Array<{
+      client_message_id: string;
+      prompt_text: string;
+      created_at: number;
+      omp_message_id?: string | null;
+    }>;
+    return rows.map((r) => ({
+      clientMessageId: r.client_message_id,
+      promptText: r.prompt_text,
+      createdAt: r.created_at,
+      ompMessageId: r.omp_message_id || undefined,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bind an OMP message ID to an existing recorded client message ID.
+ */
+export function bindPersistedOmpMessageId(
+  sessionId: string,
+  clientMessageId: string,
+  ompMessageId: string,
+  dbPath?: string,
+): void {
+  if (!sessionId || !clientMessageId || !ompMessageId) return;
+  const index = openTitleIndex(dbPath);
+  if (!index) return;
+  try {
+    index.bindOmpMessageId.run(ompMessageId, sessionId, clientMessageId);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Delete all persisted message mappings for a session ID.
+ */
+export function deletePersistedMessageIds(sessionId: string, dbPath?: string): void {
+  if (!sessionId) return;
+  const index = openTitleIndex(dbPath);
+  if (!index) return;
+  try {
+    index.deleteMessageIds.run(sessionId);
+  } catch {
+    /* best-effort */
+  }
+}
+
