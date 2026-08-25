@@ -173,7 +173,15 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
 
     expect(await (await fetch(BASE + "mcp")).json()).toEqual({});
     expect(await (await fetch(BASE + "vcs")).json()).toEqual({ branch: "main", default_branch: "main" });
-    expect(await (await fetch(BASE + "command")).json()).toBeArray();
+    
+    const commands = (await (await fetch(BASE + "command")).json()) as Array<{ name: string; description: string; template?: string }>;
+    expect(commands).toBeArray();
+    expect(commands.map((c) => c.name)).toContain("help");
+    expect(commands.map((c) => c.name)).toContain("git");
+    expect(commands.map((c) => c.name)).toContain("compact");
+
+    const skills = await (await fetch(BASE + "skill")).json();
+    expect(skills).toBeArray();
 
     const pathInfo = await (await fetch(BASE + "path?directory=" + encodeURIComponent(DIR_A))).json();
     expect(pathInfo).toMatchObject({
@@ -200,14 +208,26 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(a[0].directory).toBe(DIR_A);
     const b = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_B))).json();
     expect(b[0].id).toBe(SES_B);
+
+    // Search query parameter
+    const searched = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A) + "&search=123e4567")).json();
+    expect(searched).toHaveLength(1);
+    expect(searched[0].id).toBe(SES_A);
+
+    const nonMatch = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A) + "&search=Nomatch123xyz")).json();
+    expect(nonMatch).toHaveLength(0);
   });
 
-  test("GET /experimental/session?roots=true lists every project; limit bounds it", async () => {
+  test("GET /experimental/session?roots=true lists every project; limit and search bound it", async () => {
     const all = await (await fetch(BASE + "experimental/session?roots=true")).json();
     expect(all).toHaveLength(2);
     expect(all.map((s: { id: string }) => s.id).sort()).toEqual([SES_A, SES_B].sort());
     const one = await (await fetch(BASE + "experimental/session?roots=true&limit=1")).json();
     expect(one).toHaveLength(1);
+
+    const searchAll = await (await fetch(BASE + "experimental/session?roots=true&search=123e4567")).json();
+    expect(searchAll).toHaveLength(1);
+    expect(searchAll[0].id).toBe(SES_A);
   });
 
   test("GET /session/:id resolves 200 for known ids and 404 for unknown", async () => {
