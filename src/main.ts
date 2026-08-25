@@ -42,7 +42,7 @@ import {
   type OpenCodeProvidersResponse,
 } from "./rpc";
 import { logger, httpLogger } from "./logger";
-import { join, isAbsolute } from "node:path";
+import { join, isAbsolute, basename, extname } from "node:path";
 import { readdir, mkdir, stat, unlink, rename } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -55,6 +55,18 @@ function resolveFsPath(rawPath: string, effectiveDir = process.cwd()): string {
   if (trimmed.startsWith("~/")) return join(home, trimmed.slice(2));
   if (isAbsolute(trimmed)) return trimmed;
   return join(effectiveDir, trimmed);
+}
+
+function createProjectIdFromPath(projectPath: string): string {
+  const normalized = projectPath.replace(/\\/g, "/").replace(/\/+$/g, "").trim();
+  if (!normalized) return "";
+  const data = new TextEncoder().encode(normalized);
+  let binary = "";
+  for (const byte of data) {
+    binary += String.fromCharCode(byte);
+  }
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `path_${encoded}`;
 }
 
 const providerCache = new Map<string, { data: OpenCodeProvidersResponse; expiresAt: number }>();
@@ -301,6 +313,217 @@ const server = Bun.serve({
           return json({ success: true, path: resolved });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "mkdir failed", 500);
+        }
+      }
+
+      // OpenCode directory switch / create
+      if ((path === "/opencode/directory" || path === "/api/opencode/directory") && req.method === "POST") {
+        const body = (await readJson(req)) as { path?: string; create?: boolean } | undefined;
+        const target = body?.path?.trim();
+        if (!target) return jsonError("Path is required", 400);
+
+        const resolved = resolveFsPath(target, effectiveDir);
+        if (body?.create === true) {
+          try {
+            await mkdir(resolved, { recursive: true });
+          } catch (err) {
+            return jsonError(err instanceof Error ? err.message : "Failed to create directory", 500);
+          }
+        }
+
+        try {
+          const s = await stat(resolved);
+          if (!s.isDirectory()) {
+            return jsonError("Specified path is not a directory", 400);
+          }
+        } catch {
+          return jsonError("Directory does not exist", 400);
+        }
+
+        const currentSettings = readOmpConfig(effectiveDir);
+        const existingProjects = Array.isArray(currentSettings.projects)
+          ? [...(currentSettings.projects as Array<Record<string, unknown>>)]
+          : [];
+
+        const projectId = createProjectIdFromPath(resolved);
+        const existingIndex = existingProjects.findIndex(
+          (p) => p && typeof p === "object" && p.path === resolved
+        );
+
+        if (existingIndex >= 0) {
+          existingProjects[existingIndex] = {
+            ...existingProjects[existingIndex],
+            lastOpenedAt: Date.now(),
+          };
+        } else {
+          const label = basename(resolved) || resolved;
+          existingProjects.push({
+            id: projectId,
+            path: resolved,
+            label,
+            addedAt: Date.now(),
+            lastOpenedAt: Date.now(),
+          });
+        }
+
+        const updatedSettings = writeOmpConfig({
+          projects: existingProjects,
+          activeProjectId: projectId,
+          lastDirectory: resolved,
+        });
+
+        return json({
+          success: true,
+          restarted: false,
+          path: resolved,
+          settings: updatedSettings,
+        });
+      }
+
+      // Filesystem read
+      if ((path === "/fs/read" || path === "/api/fs/read") && req.method === "GET") {
+        const rawPath = url.searchParams.get("path")?.trim() || "";
+        const optional = url.searchParams.get("optional") === "true";
+        if (!rawPath) return jsonError("Path is required", 400);
+        const resolved = resolveFsPath(rawPath, effectiveDir);
+        try {
+          const s = await stat(resolved);
+          if (!s.isFile()) {
+            return jsonError("Specified path is not a file", 400);
+          }
+          const content = await Bun.file(resolved).text();
+          return new Response(content, {
+            status: 200,
+            headers: {
+              ...cors,
+              "Content-Type": "text/plain; charset=utf-8",
+            },
+          });
+        } catch (err: any) {
+          if (err && (err.code === "ENOENT" || String(err).includes("ENOENT"))) {
+            if (optional) {
+              return new Response("", {
+                status: 200,
+                headers: {
+                  ...cors,
+                  "Content-Type": "text/plain; charset=utf-8",
+                },
+              });
+            }
+            return jsonError("File not found", 404);
+          }
+          return jsonError(err instanceof Error ? err.message : "read failed", 500);
+        }
+      }
+
+      // Filesystem raw
+      if ((path === "/fs/raw" || path === "/api/fs/raw") && req.method === "GET") {
+        const rawPath = url.searchParams.get("path")?.trim() || "";
+        const optional = url.searchParams.get("optional") === "true";
+        const download = url.searchParams.get("download") === "true";
+        if (!rawPath) return jsonError("Path is required", 400);
+        const resolved = resolveFsPath(rawPath, effectiveDir);
+        try {
+          const s = await stat(resolved);
+          if (!s.isFile()) {
+            return jsonError("Specified path is not a file", 400);
+          }
+          const ext = extname(resolved).toLowerCase();
+          const mimeTypes: Record<string, string> = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+            ".ico": "image/x-icon",
+            ".bmp": "image/bmp",
+            ".avif": "image/avif",
+            ".pdf": "application/pdf",
+            ".json": "application/json",
+            ".txt": "text/plain",
+            ".md": "text/markdown",
+            ".html": "text/html",
+            ".css": "text/css",
+            ".js": "application/javascript",
+            ".ts": "text/plain",
+          };
+          const mimeType = mimeTypes[ext] || "application/octet-stream";
+          const headers: Record<string, string> = {
+            ...cors,
+            "Content-Type": mimeType,
+            "Cache-Control": "no-store",
+          };
+          if (download) {
+            const fileName = basename(resolved);
+            const asciiOnly = fileName.replace(/[^\x00-\x7F]/g, "") || "file";
+            const encoded = encodeURIComponent(fileName);
+            headers["Content-Disposition"] = `attachment; filename="${asciiOnly}"; filename*=UTF-8''${encoded}`;
+          }
+          const file = Bun.file(resolved);
+          return new Response(file, {
+            status: 200,
+            headers,
+          });
+        } catch (err: any) {
+          if (err && (err.code === "ENOENT" || String(err).includes("ENOENT"))) {
+            if (optional) {
+              return new Response("", {
+                status: 200,
+                headers: {
+                  ...cors,
+                  "Content-Type": "application/octet-stream",
+                },
+              });
+            }
+            return jsonError("File not found", 404);
+          }
+          return jsonError(err instanceof Error ? err.message : "raw read failed", 500);
+        }
+      }
+
+      // Filesystem clone
+      if ((path === "/fs/clone" || path === "/api/fs/clone") && req.method === "POST") {
+        const body = (await readJson(req)) as { remoteUrl?: string; destinationPath?: string } | undefined;
+        const remoteUrl = body?.remoteUrl?.trim();
+        const destinationPath = body?.destinationPath?.trim();
+        if (!remoteUrl) return jsonError("Repository URL is required", 400);
+        if (!destinationPath) return jsonError("Destination path is required", 400);
+        const resolved = resolveFsPath(destinationPath, effectiveDir);
+        try {
+          const proc = Bun.spawn(["git", "clone", "--", remoteUrl, resolved], {
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const exitCode = await proc.exited;
+          const stdout = await new Response(proc.stdout).text();
+          const stderr = await new Response(proc.stderr).text();
+          if (exitCode !== 0) {
+            return jsonError(stderr.trim() || stdout.trim() || `git clone failed with code ${exitCode}`, 500);
+          }
+          return json({ success: true, path: resolved });
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "git clone failed", 500);
+        }
+      }
+
+      // Filesystem reveal
+      if ((path === "/fs/reveal" || path === "/api/fs/reveal") && req.method === "POST") {
+        const body = (await readJson(req)) as { path?: string } | undefined;
+        const target = body?.path?.trim();
+        if (!target) return jsonError("Path is required", 400);
+        const resolved = resolveFsPath(target, effectiveDir);
+        try {
+          if (process.platform === "darwin") {
+            Bun.spawn(["open", "-R", resolved]);
+          } else if (process.platform === "win32") {
+            Bun.spawn(["explorer.exe", `/select,${resolved}`]);
+          } else {
+            Bun.spawn(["xdg-open", resolved]);
+          }
+          return json({ success: true, path: resolved });
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "reveal failed", 500);
         }
       }
 
