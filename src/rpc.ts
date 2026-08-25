@@ -13,7 +13,7 @@ export function embeddedOmpConfigOverlay(): string {
   const file = join(dir, "config.yml");
   const extPath = join(import.meta.dir, "..", "extensions", "question.ts");
   const extensionsConfig = existsSync(extPath) ? `\nextensions:\n  - ${JSON.stringify(extPath)}\n` : "\n";
-  writeFileSync(file, `mcp.enableProjectConfig: false${extensionsConfig}`);
+  writeFileSync(file, `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true${extensionsConfig}`);
   return file;
 }
 
