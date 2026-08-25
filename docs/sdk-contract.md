@@ -1,8 +1,7 @@
-# @opencode-ai/sdk 1.18.21 — the contract the UI is typed against
+# @opencode-ai/sdk 1.18.21 — The Contract OpenChamber UI Is Typed Against
 
-Captured 2026-08-24. Installed at `gap-analysis/sdk/node_modules/@opencode-ai/sdk/`.
-Version skew to keep in mind everywhere: **SDK 1.18.21** (types) vs **opencode 1.17.11** (live binary,
-probed) vs **OMP 17.3.5** (sidecar's backend). The SDK's v1-era type file is already a revision or two
+Captured 2026-08-24. Reference: `@opencode-ai/sdk` 1.18.21.
+Version context: **SDK 1.18.21** (types) vs **opencode 1.17.11** (live binary) vs **OMP 17.3.5** (server backend). The SDK's v1-era type file is already a revision or two
 behind the live server in places (see §6).
 
 ## 1. Packaging

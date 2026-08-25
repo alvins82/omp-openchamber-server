@@ -1,9 +1,8 @@
-# OpenChamber 1.20.0 — opencode protocol usage (repo clone @ b638305)
+# OpenChamber 1.20.0 — OpenCode Protocol Usage
 
-Captured 2026-08-24. Sources: `packages/ui/src/lib/opencode/client.ts` (2021 lines),
-`packages/ui/src/sync/event-pipeline.ts` (958), `packages/ui/src/sync/event-reducer.ts` (619),
-`packages/web/server/lib/opencode/proxy.js` (957), `packages/web/server/lib/event-stream/*`,
-`@opencode-ai/sdk` 1.18.21 (installed at `gap-analysis/sdk/node_modules/@opencode-ai/sdk/`).
+Captured 2026-08-24. Sources: OpenChamber UI (`packages/ui/src/lib/opencode/client.ts`,
+`packages/ui/src/sync/event-pipeline.ts`, `packages/ui/src/sync/event-reducer.ts`),
+OpenChamber Web Server (`packages/web/server/lib/opencode/proxy.js`), and `@opencode-ai/sdk` 1.18.21.
 
 ## 0. Topology
 

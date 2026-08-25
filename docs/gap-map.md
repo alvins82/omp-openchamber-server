@@ -1,13 +1,12 @@
-# Gap map - sidecar vs OpenChamber 1.20.0 OpenCode API usage
+# Gap map - server vs OpenChamber 1.20.0 OpenCode API usage
 
-Date: 2026-08-24. Scope: remaining gaps between the local sidecar (openchamber-omp-proxy:
+Date: 2026-08-24. Scope: remaining gaps between the proxy server (`omp-openchamber-server`:
 OpenCode HTTP API over OMP 17.3.5 on :4096) and the real opencode server API surface that
-OpenChamber 1.20.0 actually consumes. Companion docs: `gap-analysis/oc-usage.md` (what the
-1.20.0 UI calls, route by route), `gap-analysis/sdk-contract.md` (SDK 1.18.21 types and the
-188-route table), `gap-analysis/omp-capabilities.md` (OMP 17.3.5 RPC surface),
-`gap-analysis/sidecar-coverage.md` (sidecar audit, route by route). Predecessors:
-`phase0-report.md` (08-22/23 live probes), `contract-diff.md`, `omp-protocol-notes.md`.
-Wire ground truth: `/tmp/oc-probe/` (real `opencode serve` 1.17.11, captured 08-24).
+OpenChamber 1.20.0 actually consumes. Companion docs: [`oc-usage.md`](./oc-usage.md) (what the
+1.20.0 UI calls, route by route), [`sdk-contract.md`](./sdk-contract.md) (SDK 1.18.21 types and the
+188-route table), [`omp-capabilities.md`](./omp-capabilities.md) (OMP 17.3.5 RPC surface),
+[`sidecar-coverage.md`](./sidecar-coverage.md) (sidecar audit, route by route). Predecessors:
+[`phase0-report.md`](./phase0-report.md) (live probes), [`contract-diff.md`](./contract-diff.md), [`omp-protocol-notes.md`](./omp-protocol-notes.md).
 
 ## Bottom line
 
@@ -61,7 +60,7 @@ Wire ground truth: `/tmp/oc-probe/` (real `opencode serve` 1.17.11, captured 08-
   (packages/web/server/lib/event-stream/protocol.js:14-68), and its normalized
   `openchamber:session-status` records do reach the UI pipeline (event-pipeline.ts:95). So
   status indicators can update even though everything else from the stream is dead.
-- Phase-0 reconciliation: the phase-0 UI checkout (/Users/alvin/claude-cowork/openchamber) is
+- Phase-0 reconciliation: the phase-0 OpenChamber UI checkout is
   1.18.4 and has the identical `resolveEventPayload` gate, so P2 ("live turn through the real
   UI works") is not a contradiction. Phase-0 verified the wire bytes and turn completion
   (JSONL), not SSE rendering in the UI; the turn's content reached the UI via HTTP fetches

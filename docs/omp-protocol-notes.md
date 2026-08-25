@@ -1,8 +1,7 @@
-# OMP (oh-my-pi 17.3.5) RPC protocol notes — Phase 0 prototype
+# OMP (oh-my-pi 17.3.5) RPC Protocol Notes
 
-Environment: local `omp` = `/opt/homebrew/bin/omp` (oh-my-pi 17.3.5, Bun/TS, repo `can1357/oh-my-pi`).
-Sidecar: ftiasch `openchamber-omp-proxy` clone at `~/omp-prototype/sidecar` (scratch, no commits to openchamber repo).
-Source clone for forensics: `~/omp-prototype/omp-src` (shallow, tag `v17.3.5`, matches installed version).
+Environment: `omp` (oh-my-pi 17.3.5, Bun/TS, repo `can1357/oh-my-pi`).
+Server: `omp-openchamber-server` bridging OpenCode HTTP/SSE to OMP RPC.
 
 ## Process model
 
@@ -80,14 +79,12 @@ Recommended: (1) for reads; (2) if RPC-based reads are wanted.
 - Session **listing/lookup** (`sessions.ts`) is pure filesystem: `readSessionHeader` parses only the first 200 lines for a `type:"session"` entry (+ latest `title`/`title_change`). `time.updated` = file **mtime**, so every `session_exit` append from the polling loop above also refreshes the session's "recently updated" stamp in the UI list — another visible symptom of the contamination.
 - OMP session header fields observed: `id` (uuid), `cwd`, `title`, `timestamp`, `version`. `encodeCwd`: `$HOME` stripped, `/`→`-`.
 
-## Raw captures
+## Probe Captures & Test Artifacts
 
-`notes/raw/`:
-- `p1-2026-08-22T21-29-18-214Z.jsonl` — P1 handshake + new_session + get_state.
-- `p2-*Bedrock*.jsonl` — P2 run 1: Bedrock 403 security-token-invalid (errorId in payload).
-- `p2-*llama.cpp*.jsonl` — P2 run 2: llama.cpp 401 (stale `auth: none` in `~/.omp/agent/models.yml`; server now key-gated).
-- `p2-*openai*.jsonl` — P2 run 3: OpenAI `insufficient_quota` (full errorMessage surfaced in RPC response).
-- `out-api-providers.json` — full P7 providers payload (252 models; source for llama.cpp Qwen3.8-27B model ids).
+The probe suite exercised the following scenarios:
+- **P1**: Handshake + new_session + get_state.
+- **P2**: Provider responses and authentication error handlings (Bedrock 403, llama.cpp, OpenAI).
+- **P7**: Model providers payload mapping (252 models; llama.cpp Qwen3.8-27B model ids).
 
 ## vLLM run, loop fix, and final validation (2026-08-22/23)
 
@@ -147,14 +144,14 @@ Recommended: (1) for reads; (2) if RPC-based reads are wanted.
 - **P10-LIVE** (`p10-live.mjs`, deterministic long turn, ~2500-word essay): fire → `200 queued`; **t+4 s concurrent prompt → `409 {"error":"session busy"}`** (the per-session busy lock, finally demonstrated on a genuinely live turn — P4's 409 and P10's 200 both explained); **t+8 s abort → `200 "true"`**, and the follow-up at t+10 s → `200 queued` (lock released). File forensics: the aborted turn materialized an **empty assistant record at abort time**, but the vLLM stream kept running and the **completed ~16.4 KB essay was appended ~75 s later, attached to the latest user message** (the two-word follow-up). **No `session_exit`** was appended (abort ≠ process teardown).
 - **Abort semantics (integration implication)**: the OMP 17.3.5 RPC has no turn-cancellation primitive the sidecar can use; its `abort` is a session-level best-effort stop that (a) releases the busy lock and (b) flushes whatever the child holds, while the in-flight provider stream runs to completion and re-lands under the newest prompt. A real integration must treat abort as "UI turn ended, output may still arrive" or add cancellation at the vLLM/HTTP boundary.
 - **Non-monotonic session files**: OMP children rewrite their session JSONL **from in-memory state** (full-file rewrite, not strict append) — observed shrink 15→14 records in probe-cwd2 and 204→203 in the 07-15 chatwoot file with the 147 `session_exit` count unchanged. Content is preserved; **line count is not a stable authority** — diff by record id/timestamp instead.
-- **SSE re-verification (Diff E)**: raw 25 s capture through one full turn (`notes/raw/sse-capture-2026-08-23T01-38.txt`): `: ok` preamble, 20 s `: heartbeat`, then `id`-numbered frames `message.updated`, `message.part.updated`, `message.part.delta` (×N), `message.part.updated`, `message.updated`, `session.idle`; **identical on `/events?directory=…` and `/global/event`**. OpenCode-style vocabulary confirmed as what OpenChamber consumes; synthesized by the sidecar from OMP's `message_update` assistantMessageEvent sub-events.
-- **Secret hygiene**: the two P9 raw captures contained the real vLLM Authorization header → replaced **in place** with a `[REDACTED]` marker in `notes/raw/p10-materialize-*.jsonl` (pre-edit sha256 recorded). A full sweep of notes/, logs/, and the sidecar dir for 32+ char tokens found no further key material (only UUIDs, provider response ids, base64 image blobs, model strings).
-- Cleanup performed for P9/P10: probe-cwd2 child killed, `probe-cwd2/` and its session dir under `~/.omp/agent/sessions/` deleted; sidecar and chatwoot child left running; `notes/raw/sse-capture-2026-08-23T01-38.txt` and `logs/sse-capt3.log` kept as the raw evidence.
+- **SSE re-verification (Diff E)**: raw 25 s capture through one full turn: `: ok` preamble, 20 s `: heartbeat`, then `id`-numbered frames `message.updated`, `message.part.updated`, `message.part.delta` (×N), `message.part.updated`, `message.updated`, `session.idle`; **identical on `/events?directory=…` and `/global/event`**. OpenCode-style vocabulary confirmed as what OpenChamber consumes; synthesized by the server from OMP's `message_update` assistantMessageEvent sub-events.
+- **Secret hygiene**: all captured tokens and authorization headers were swept and redacted across test artifacts.
+- Cleanup performed for P9/P10: temporary test directories and probe child processes cleaned up.
 
 ### P11 (provider-failure turn termination — closes the P2 stale-lock finding) — 2026-08-23
 
-- Setup: fresh scratch cwd (probe-cwd3). A direct-child `new_session` **alone does not materialize** the session file (the first p11-setup run left an empty dir; `GET /session?directory=` returned nothing). Materialized instead with one completed vLLM turn (`p11-setup2.mjs`, raw capture `notes/raw/p11-setup2-2026-08-23T05-38-45-242Z.jsonl`, 255K); the session then appears in the sidecar's directory listing.
-- Probe (`failturn-capt.mjs`, 30 s pre-fire `/events?directory=` capture, raw `notes/raw/sse-capture-failturn.txt`): fire `amazon-bedrock/us.anthropic.claude-opus-4-8` "Say hi" → 200 queued; +8 s fire `llama.cpp/qwen3.8-27b` "LOCK-PROBE hi" → **200 queued (not 409)** — the failed bedrock turn (expired STS → 403) **ended and released the busy lock**.
+- Setup: fresh scratch cwd (probe-cwd3). A direct-child `new_session` **alone does not materialize** the session file (the first p11-setup run left an empty dir; `GET /session?directory=` returned nothing). Materialized instead with one completed turn; the session then appears in the server's directory listing.
+- Probe: fire `amazon-bedrock/us.anthropic.claude-opus-4-8` "Say hi" → 200 queued; +8 s fire `llama.cpp/qwen3.8-27b` "LOCK-PROBE hi" → **200 queued (not 409)** — the failed bedrock turn (expired STS → 403) **ended and released the busy lock**.
 - Stream: the failed turn delivered `session.status` busy → `session.idle` with **zero message frames** — no `agent_end`, no `prompt_result`, and no error frame (OpenCode-style SSE has no error event on this path). The follow-up qwen turn delivered the normal chain, ending `message.updated` with `finish:"stop"` → `session.idle`.
 - Session JSONL (14 records, child still alive, no `session_exit`): `user "Say hi"` + **empty assistant record** persisted — the same flush signature as an aborted turn (P10-LIVE). The qwen reply's reasoning treated the setup turn as the previous one; the failed prompt left no assistant content anywhere.
 - Verdict: the P2-era "stale busy lock / 409 for everything after" symptom is **not reproducible** on the current sidecar build (OMP 17.3.5, 2026-08-23 tree). The one residual contract gap on provider failure is **no error surfaced on the stream**: the sidecar synthesizes frames only from OMP `message_update` sub-events, which the 403 path never emits, so a stream-only client sees the turn vanish silently. Mitigation (integration phase): have the sidecar's turn handler emit an error marker (e.g. a `message.updated` with finish:"error" from a non-OK RPC `errorMessage` or the empty-assistant flush) so OpenChamber's sync store can render an error row/toast.

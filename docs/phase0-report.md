@@ -1,9 +1,8 @@
-# Phase-0 report — external OMP (oh-my-pi 17.3.5) sidecar vs OpenChamber
+# Phase-0 report — external OMP (oh-my-pi 17.3.5) server vs OpenChamber
 
 Date: 2026-08-22/23. Scope: verify what an OpenChamber client actually receives when the
-OpenCode-API surface is served by an OMP-based sidecar, using only scratch state outside
-`/Users/alvin/claude-cowork/openchamber`. Companion docs: `contract-diff.md` (API-level
-diffs A-F) and `omp-protocol-notes.md` (OMPP/OMP process & file-level protocol notes).
+OpenCode-API surface is served by an OMP-based proxy server. Companion docs: [`contract-diff.md`](./contract-diff.md) (API-level
+diffs A-G) and [`omp-protocol-notes.md`](./omp-protocol-notes.md) (process & file-level protocol notes).
 
 ## Bottom line
 
@@ -59,13 +58,9 @@ paths) - D open (`GET /event?directory=` 404; global stream compensates) - E ver
 
 ## Environment state at close
 
-- OMP sidecar (bun, pid 15148) running and healthy on 127.0.0.1:4096; OpenChamber UI on
-  :3100 running against it; no OMP children at rest (spawned on demand).
-- User data untouched: `/Users/alvin/claude-cowork/openchamber` zero writes; chatwoot
-  session `2026-07-15T13-31-49-153Z...` left in place at 203 records / 147 exit records.
-- Probe state removed: `probe-cwd2/` and `probe-cwd3/` with their session dirs deleted (P11 captures kept in notes/raw); vLLM key never echoed
-  or stored in notes (redacted in the two materialize captures; 32+-char token sweep
-  clean).
+- Proxy server (bun) running and healthy on 127.0.0.1:4096; OpenChamber UI running against it; no OMP children at rest (spawned on demand).
+- User data untouched: test workspace zero writes.
+- Probe state removed: temporary test directories cleaned up.
 
 ## Open questions for a real integration
 

@@ -1,7 +1,6 @@
-# OMP 17.3.5 (oh-my-pi) — what the sidecar's backend can actually do
+# OMP 17.3.5 (oh-my-pi) — RPC Backend Capabilities
 
-Captured 2026-08-24 from `omp-src/` (the vendored OMP checkout). Canonical wire contract:
-`docs/rpc.md` (875 lines). Dispatcher: `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.
+Canonical wire contract: `docs/rpc.md`. Dispatcher: `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.
 Frame code: `rpc-frame.ts`, `rpc-messages.ts`, `rpc-types.ts`.
 
 ## 1. Transport

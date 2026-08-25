@@ -1,26 +1,24 @@
-# openchamber-omp-proxy (sidecar) — current state audit
+# omp-openchamber-server — API Route Coverage Audit
 
-Captured 2026-08-24 from `sidecar/src/`. Sources: `main.ts` (231), `sessions.ts` (230),
-`messages.ts` (446), `prompt.ts` (541), `rpc.ts` (424), `sse.ts` (82) + 10 test files.
+> [!NOTE]
+> This document details the baseline audit of the OpenCode HTTP API vs OMP RPC backend. Core gaps identified in this audit (SSE envelope, session creation, bootstrap shapes, lifecycle, part shapes) have since been resolved in `src/` and covered by the 172-test suite. See [`gap-map.md`](./gap-map.md) and [`contract-diff.md`](./contract-diff.md).
 
 ## 1. Architecture
 
-- Bun HTTP server, default `:4096` (`OC_SIDECAR_PORT` overrides; main.ts:37-39). Single `fetch`
-  handler with if/else route dispatch (no framework).
+- Bun HTTP server, default `:4096` (`OC_SIDECAR_PORT` overrides; `main.ts`). Single `fetch`
+  handler with route dispatch.
 - OMP 17.3.5 driven over **NDJSON stdio RPC**, one persistent child per (session, cwd)
-  (prompt.ts, rpc.ts). `withOmpRpc` spawns an ephemeral child for one-shot RPC calls
+  (`prompt.ts`, `rpc.ts`). `withOmpRpc` spawns an ephemeral child for one-shot RPC calls
   (e.g. `/config/providers`).
 - Session discovery: scans `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl`, reads the first 200
-  lines for a `type:"session"` header (sessions.ts:69-111); OMP UUID → `ses_<32hex>` id mapping
-  is a reversible transform (sessions.ts:49-67).
-- Message loading: **JSONL file fast path first**, RPC fallback; 5-second cache with
-  inflight dedupe (messages.ts:84-92, 412+).
-- Graceful shutdown: SIGTERM/SIGINT kills every OMP child (main.ts:214-231) — a live turn would
-  otherwise keep writing the session file (notes/omp-protocol-notes.md).
-- The OpenChamber web server (port 3000) proxies `/api/*` here with the prefix stripped
-  (web packages/web/server/lib/opencode/proxy.js:883), so the sidecar sees bare `/session...`
-  paths and must answer for both the UI (via proxy) and the web server's direct server-side
-  consumers.
+  lines for a `type:"session"` header (`sessions.ts`); OMP UUID → `ses_<32hex>` id mapping
+  is a reversible transform (`sessions.ts`).
+- Message loading: **JSONL file fast path first**, RPC fallback; cache with
+  inflight dedupe (`messages.ts`).
+- Graceful shutdown: SIGTERM/SIGINT kills every OMP child (`main.ts`) — a live turn would
+  otherwise keep writing the session file ([`omp-protocol-notes.md`](./omp-protocol-notes.md)).
+- The OpenChamber web server (port 3000) proxies `/api/*` here with the prefix stripped, so the proxy server sees bare `/session...`
+  paths and answers for both the UI (via proxy) and direct server-side consumers.
 
 ## 2. Route-by-route audit (vs real opencode 1.17.11, probed 2026-08-24)
 
