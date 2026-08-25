@@ -493,6 +493,25 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(statJson.exists).toBe(true);
     expect(statJson.isFile).toBe(true);
 
+    // read
+    const readRes = await fetch(BASE + "api/fs/read?path=" + encodeURIComponent(testFile));
+    expect(readRes.status).toBe(200);
+    expect(await readRes.text()).toBe("Hello World");
+
+    // raw
+    const rawRes = await fetch(BASE + "api/fs/raw?path=" + encodeURIComponent(testFile));
+    expect(rawRes.status).toBe(200);
+    expect(await rawRes.text()).toBe("Hello World");
+
+    // read 404 vs optional
+    const missingFile = join(testDir, "missing.txt");
+    const readMissing = await fetch(BASE + "api/fs/read?path=" + encodeURIComponent(missingFile));
+    expect(readMissing.status).toBe(404);
+
+    const readOptional = await fetch(BASE + "api/fs/read?path=" + encodeURIComponent(missingFile) + "&optional=true");
+    expect(readOptional.status).toBe(200);
+    expect(await readOptional.text()).toBe("");
+
     // rename
     const renameRes = await fetch(BASE + "api/fs/rename", {
       method: "POST",
@@ -508,6 +527,24 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
       body: JSON.stringify({ path: renamedFile }),
     });
     expect(delRes.status).toBe(200);
+  });
+
+  test("POST /api/opencode/directory creates directory and registers project in settings", async () => {
+    const newProjDir = join(FAKE_HOME, "projects", "new-test-project");
+
+    const res = await fetch(BASE + "api/opencode/directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: newProjDir, create: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.success).toBe(true);
+    expect(body.path).toBe(newProjDir);
+    expect(body.settings).toBeDefined();
+    expect(body.settings.activeProjectId).toMatch(/^path_/);
+    expect(body.settings.projects.some((p: any) => p.path === newProjDir)).toBe(true);
   });
 
   test("GET /session/status is empty before any prompt", async () => {
