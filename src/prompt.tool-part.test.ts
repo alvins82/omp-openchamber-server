@@ -102,4 +102,49 @@ describe("reduceToolPartState", () => {
     expect(state.input).toEqual({ path: "test.txt" });
     expect(state.time).toEqual({ start: 1000 });
   });
+
+  it("extracts intent/i as description and parses nested toolCall arguments", () => {
+    const state = reduceToolPartState(
+      undefined,
+      {
+        type: "toolcall_end",
+        toolCall: {
+          id: "call-2",
+          name: "read",
+          arguments: { path: "README.md", i: "Reading README" },
+        },
+      },
+      1000,
+    );
+
+    expect(state.input).toEqual({
+      path: "README.md",
+      i: "Reading README",
+      description: "Reading README",
+    });
+  });
+
+  it("handles custom tool_execution_start events from OMP RPC", () => {
+    const state = reduceToolPartState(
+      undefined,
+      {
+        customType: "tool_execution_start",
+        data: {
+          toolCallId: "chatcmpl-tool-123",
+          toolName: "read",
+          args: { path: "/path/to/dir" },
+          intent: "Listing directory",
+        },
+      },
+      1000,
+    );
+
+    expect(state.status).toBe("running");
+    expect(state.input).toEqual({
+      path: "/path/to/dir",
+      description: "Listing directory",
+    });
+    expect(state.time).toEqual({ start: 1000 });
+  });
 });
+

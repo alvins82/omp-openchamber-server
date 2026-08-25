@@ -1,4 +1,4 @@
-# openchamber-omp-proxy
+# omp-openchamber-server
 
 Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my-pi](https://github.com/can1357/oh-my-pi) coding sessions — without modifying either project.
 
@@ -13,7 +13,7 @@ Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my
 ### Run
 
 ```bash
-# Terminal 1 — start the proxy
+# Terminal 1 — start the proxy server
 bun run start
 # → [proxy] listening on http://127.0.0.1:4096
 
@@ -35,10 +35,20 @@ curl http://127.0.0.1:4096/global/health
 # Session list
 curl "http://127.0.0.1:4096/session?directory=<your-project-dir>"
 
-# Run tests
+# Type-check
 bun run check
+
+# Default suite (mock OMP; Tier C live tests auto-skip)
 bun test
+
+# Live suite (real `omp` binary + reachable provider; minutes of wall time)
+bun run test:live
 ```
+
+### Test tiers
+
+- **Tier A/B** (`bun test`): contract, sequence, sessions, and HTTP integration tests driven by `test/mock-omp.mjs` (a deterministic stand-in speaking the real OMP RPC dialect). Always green; no network, no provider.
+- **Tier C** (`bun run test:live` → `src/integration.live.test.ts`): end-to-end against the real `omp` binary. Auto-skips when the `omp` binary or a reachable provider is missing, so the default `bun test` costs zero. Requires: `omp` on `PATH`, a working provider in `~/.omp/agent/models.yml` (in this environment: `llama.cpp` / `qwen3.8-27b` on a local vLLM), and a few minutes — it creates a scratch session, runs real turns, and asserts the exact OpenCode event vocabulary, message persistence shapes, busy-lock `409`, and abort semantics. Verified green (see `docs/contract-diff.md`, "Tier C result").
 
 ## Design
 
@@ -53,7 +63,7 @@ The proxy translates three paths:
 | OpenChamber call               | Backed by omp RPC               |
 | ------------------------------ | ------------------------------- |
 | `GET /session`                 | `~/.omp/agent/sessions` scan    |
-| `GET /session/:id/message`     | `switch_session` + `get_messages` |
+| `GET /session/:id/message`     | session JSONL read (fast path); `switch_session` + `get_messages` RPC as fallback |
 | `POST /session/:id/prompt_async` | `prompt` / `set_model` / streaming events |
 | `GET /config/providers`        | `get_available_models`          |
 | `POST /session/:id/abort`      | `abort`                         |
@@ -65,3 +75,23 @@ Key invariants:
 - Message records carry `parentID` and `finish: "stop"` so OpenChamber's turn grouping and sorted render work correctly.
 - Tool calls (`read`, `bash`, `grep`, …) are mapped to real `type:"tool"` parts with `state.status/input/output/time`, not just text dumps.
 - Live prompts stream via `message.part.delta / message.part.updated / session.status` SSE events that match OpenChamber's reducer contract.
+
+Embedded-OMP resilience (`src/rpc.ts`): the spawned OMP instance is hardened so a flaky environment cannot wedge the proxy —
+
+- Readiness is gated on the **first real RPC response** (`get_state` probe) rather than the `ready` frame; OMP processes stdin frames before it emits `ready`, but the frame can be withheld by subsystems (MCP servers, update checks) that stall. 30 s per attempt, up to 3 spawn attempts.
+- A per-run `--config` overlay (`mcp.enableProjectConfig: false`) disables the project MCP servers for the embedded instance only. The sidecar's own `/mcp` returns `[]`, so those servers are pure overhead here, and a deadlocking one (observed: `typescript_lsp`, up to 11 minutes) otherwise delays every request. The user's global OMP config is untouched.
+- The child runs in its own process group; failures and shutdown kill the whole tree (MCP/LSP grandchildren included), so nothing lingers.
+- `PI_SKIP_VERSION_CHECK=1` removes the update-check network call from startup.
+
+## Documentation
+
+Comprehensive design specifications and protocol analyses are available in [`docs/`](./docs):
+
+- [`contract-diff.md`](./docs/contract-diff.md) — Detailed comparison of OpenCode contract vs OMP proxy implementation.
+- [`omp-protocol-notes.md`](./docs/omp-protocol-notes.md) — Protocol specifications, frame formats, and lifecycle events for oh-my-pi RPC.
+- [`gap-map.md`](./docs/gap-map.md) — Complete gap analysis and resolution matrix.
+- [`phase0-report.md`](./docs/phase0-report.md) — Initial findings, architectural decisions, and prototype results.
+- [`omp-capabilities.md`](./docs/omp-capabilities.md) — Breakdown of OMP features and capabilities.
+- [`sidecar-coverage.md`](./docs/sidecar-coverage.md) — Endpoint mapping and coverage verification.
+- [`oc-usage.md`](./docs/oc-usage.md) — OpenChamber frontend expectations and event contracts.
+- [`sdk-contract.md`](./docs/sdk-contract.md) — OpenCode SDK data structures and type contracts.

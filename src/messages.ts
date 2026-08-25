@@ -1,5 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { withOmpRpc } from "./rpc";
 import { getOmpSessionByOpenCodeId } from "./sessions";
+import { sessionLogger } from "./logger";
 
 export interface OpenCodeMessageRecord {
   info: {
@@ -8,10 +10,19 @@ export interface OpenCodeMessageRecord {
     sessionID: string;
     parentID?: string;
     agent: string;
-    model: { providerID: string; modelID: string; variant: string };
+    model: { id?: string; providerID: string; modelID: string; variant: string };
     providerID?: string;
     modelID?: string;
     variant?: string;
+    mode?: string;
+    path?: { cwd: string; root: string };
+    cost?: number;
+    tokens?: {
+      input: number;
+      output: number;
+      reasoning: number;
+      cache: { read: number; write: number };
+    };
     finish?: string;
     time: { created: number; completed?: number };
   };
@@ -29,6 +40,7 @@ export interface OpenCodeTextPart {
 export interface OpenCodeToolPart {
   id: string;
   type: "tool";
+  callID: string;
   tool: string;
   state: {
     status: "pending" | "running" | "completed" | "error";
@@ -122,14 +134,37 @@ function createToolPart(
   index: number,
   startTime: number,
 ): OpenCodeToolPart {
-  const tool = typeof block.name === "string" && block.name.length > 0 ? block.name : "tool";
+  const raw = block as unknown as Record<string, unknown>;
+  const tool = typeof block.name === "string" && block.name.length > 0
+    ? block.name
+    : (typeof raw.tool === "string" && raw.tool.length > 0 ? (raw.tool as string) : "tool");
+  const callID = typeof block.id === "string" && block.id.length > 0
+    ? block.id
+    : (typeof raw.toolCallId === "string" && raw.toolCallId.length > 0 ? (raw.toolCallId as string) : `call_${index}`);
+
+  let input: Record<string, unknown> | undefined;
+  if (typeof block.arguments === "object" && block.arguments !== null && !Array.isArray(block.arguments)) {
+    input = { ...(block.arguments as Record<string, unknown>) };
+  } else if (typeof raw.args === "object" && raw.args !== null && !Array.isArray(raw.args)) {
+    input = { ...(raw.args as Record<string, unknown>) };
+  } else if (typeof block.arguments === "string") {
+    try {
+      const p = JSON.parse(block.arguments);
+      if (typeof p === "object" && p !== null && !Array.isArray(p)) input = p as Record<string, unknown>;
+    } catch {}
+  }
+  if (input && !input.description && (input.intent || input.i || raw.intent)) {
+    input.description = (input.intent ?? input.i ?? raw.intent) as string;
+  }
+
   return {
     id: `part_${openCodeId}_${messageId}_tool_${index}_${block.id ?? tool}`,
     type: "tool",
+    callID,
     tool,
     state: {
       status: "pending",
-      input: typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined,
+      input,
       time: { start: startTime },
     },
     metadata: typeof block.id === "string" ? { toolCallId: block.id } : undefined,
@@ -156,8 +191,9 @@ function mergeToolResultIntoAssistant(
   record: OpenCodeMessageRecord,
   resultTime: number,
 ): boolean {
-  const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
-  const toolName = typeof msg.toolName === "string" ? msg.toolName : undefined;
+  const raw = msg as unknown as Record<string, unknown>;
+  const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : (typeof raw.tool_call_id === "string" ? (raw.tool_call_id as string) : undefined);
+  const toolName = typeof msg.toolName === "string" ? msg.toolName : (typeof raw.tool_name === "string" ? (raw.tool_name as string) : undefined);
 
   const toolParts = record.parts.filter(
     (part): part is OpenCodeToolPart => part.type === "tool",
@@ -165,14 +201,18 @@ function mergeToolResultIntoAssistant(
   if (toolParts.length === 0) return false;
 
   const target = toolParts.find((part) => {
-    if (toolCallId && part.metadata?.toolCallId === toolCallId) return true;
+    if (toolCallId && (part.metadata?.toolCallId === toolCallId || part.callID === toolCallId)) return true;
     if (toolName && part.tool === toolName && part.state.status === "pending") return true;
     return false;
   });
   if (!target) return false;
 
+  if (target.tool === "tool" && toolName) {
+    target.tool = toolName;
+  }
+
   const content = extractTextFromContent(msg.content);
-  const isError = msg.isError === true;
+  const isError = msg.isError === true || raw.is_error === true;
   target.state.status = isError ? "error" : "completed";
   if (isError) {
     target.state.error = content;
@@ -256,6 +296,35 @@ function buildParts(
   return parts;
 }
 
+interface RecordedUserMessage {
+  text: string;
+  clientMessageId: string;
+  timestamp: number;
+}
+
+const recordedUserMessagesBySession = new Map<string, RecordedUserMessage[]>();
+
+export function recordUserMessageId(openCodeId: string, promptTextOrMessageId: string, messageId?: string): void {
+  const actualMessageId = messageId ?? promptTextOrMessageId;
+  const promptText = messageId ? promptTextOrMessageId : "";
+  const list = recordedUserMessagesBySession.get(openCodeId) ?? [];
+  const filtered = list.filter((item) => item.clientMessageId !== actualMessageId);
+  filtered.push({ text: promptText.trim(), clientMessageId: actualMessageId, timestamp: Date.now() });
+  recordedUserMessagesBySession.set(openCodeId, filtered);
+}
+
+function extractUserMessageText(msg: AgentMessage): string {
+  if (typeof msg.content === "string") return msg.content.trim();
+  if (Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (block && typeof block === "object" && typeof block.text === "string") {
+        return block.text.trim();
+      }
+    }
+  }
+  return "";
+}
+
 export function mapRpcMessagesToOpenCodeRecords(
   messages: AgentMessage[],
   openCodeId: string,
@@ -264,6 +333,9 @@ export function mapRpcMessagesToOpenCodeRecords(
   let lastUserMessageId: string | undefined;
   let lastAssistantRecord: OpenCodeMessageRecord | undefined;
   let visibleIndex = 0;
+  const recordedList = recordedUserMessagesBySession.get(openCodeId) ?? [];
+  const userMessages = messages.filter((m) => openCodeRoleFor(m) === "user");
+  const lastUserMsg = userMessages.length > 0 ? userMessages[userMessages.length - 1] : undefined;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -279,7 +351,26 @@ export function mapRpcMessagesToOpenCodeRecords(
       }
     }
 
-    const messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
+    let messageId: string;
+    if (role === "user") {
+      const msgText = extractUserMessageText(msg);
+      const matched = (msgText && recordedList.find((r) => r.text === msgText))
+        ?? (msg === lastUserMsg && recordedList.length > 0 ? recordedList[recordedList.length - 1] : undefined);
+      if (matched) {
+        messageId = matched.clientMessageId;
+      } else if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
+        messageId = msg.id;
+      } else {
+        messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
+      }
+    } else {
+      if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
+        messageId = msg.id;
+      } else {
+        messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
+      }
+    }
+
     visibleIndex++;
     const parts = buildParts(msg, openCodeId, messageId);
 
@@ -301,7 +392,10 @@ export function mapRpcMessagesToOpenCodeRecords(
           ...baseInfo,
           parentID: lastUserMessageId,
           finish: "stop",
-          model: { providerID, modelID, variant },
+          mode: "primary",
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          model: { id: modelID, providerID, modelID, variant },
           providerID,
           modelID,
           variant,
@@ -328,10 +422,72 @@ function extractMessagesFromRpcResponse(raw: unknown): unknown {
   return raw;
 }
 
+// Fast path: read the omp session JSONL directly from disk.
+//
+// The previous implementation (loadFromRpc) spawned a transient
+// `omp --mode rpc` child per fetch, which resumed the session and was
+// SIGTERM'd afterwards. OMP's teardown bookkeeping appends a
+// `{"type":"custom","customType":"session_exit"}` record to the session
+// JSONL on that SIGTERM, so repeated UI polling rewrote user session
+// files with synthetic records every ~20s. Reading the file directly
+// yields the same message records without touching the session.
+//
+// Record shapes (omp v17.3.5 session file format):
+//   {"type":"message","id","parentId","timestamp":"<iso>","message":{"role","content":[...],
+//    "api","provider","model","usage","stopReason","timestamp":<ms>,
+//    "toolCallId","toolName","isError"}}
+// The inner `message` object matches the AgentMessage shape returned by
+// the `get_messages` RPC, so it flows through the same mapper. Truncated
+// trailing lines (concurrent mid-write) are skipped, never fatal.
+export async function loadMessagesFromFile(
+  sessionPath: string,
+  openCodeId: string,
+): Promise<OpenCodeMessageRecord[] | null> {
+  let text: string;
+  try {
+    text = await readFile(sessionPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const messages: AgentMessage[] = [];
+
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (entry.type !== "message") continue;
+
+    const raw = entry.message;
+    if (raw == null || typeof raw !== "object") continue;
+
+    const message = raw as Record<string, unknown>;
+    let id = typeof message.id === "string" ? message.id : undefined;
+    if (id === undefined && typeof entry.id === "string") id = entry.id;
+
+    let timestamp = typeof message.timestamp === "number" ? message.timestamp : undefined;
+    if (timestamp === undefined && typeof entry.timestamp === "string") {
+      const parsed = Date.parse(entry.timestamp);
+      if (!Number.isNaN(parsed)) timestamp = parsed;
+    }
+
+    messages.push({ ...message, id, timestamp } as unknown as AgentMessage);
+  }
+
+  if (messages.length === 0) return null;
+  return mapRpcMessagesToOpenCodeRecords(messages, openCodeId);
+}
+
 async function loadFromRpc(openCodeId: string, cwd: string): Promise<OpenCodeMessageRecord[]> {
   const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
   if (!session) {
-    console.error(`[messages] no session found for ${openCodeId} in ${cwd}`);
+    sessionLogger.error({ sessionID: openCodeId, cwd }, `no session found for ${openCodeId} in ${cwd}`);
     return [];
   }
 
@@ -360,10 +516,16 @@ export async function loadSessionMessages(
   const inflight = inflightLoads.get(key);
   if (inflight) return inflight;
 
-  const promise = loadFromRpc(openCodeId, cwd).catch((err) => {
-    throw new Error(
-      `Failed to load messages for ${openCodeId}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const promise = (async () => {
+    const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
+    if (!session) {
+      throw new Error(`no session found for ${openCodeId} in ${cwd}`);
+    }
+    const fromFile = await loadMessagesFromFile(session.path, openCodeId);
+    if (fromFile) return fromFile;
+    return loadFromRpc(openCodeId, cwd);
+  })().catch((err) => {
+    throw new Error(`Failed to load messages for ${openCodeId}: ${err instanceof Error ? err.message : String(err)}`);
   });
   inflightLoads.set(key, promise);
 

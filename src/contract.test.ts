@@ -83,25 +83,30 @@ describe("session ID round-trip", () => {
 // ---------------------------------------------------------------------------
 
 describe("formatOpenCodeEvent", () => {
-  it("produces id / event / data lines with double-newline terminator", () => {
+  it("produces data-only line with double-newline terminator", () => {
     const raw = formatOpenCodeEvent("test.event", { key: "val" });
-    expect(raw).toMatch(/^id: [0-9a-f-]+\nevent: test\.event\ndata: /);
+    expect(raw).toMatch(/^data: /);
     expect(raw.endsWith("\n\n")).toBe(true);
   });
 
-  it("serializes properties as valid JSON in data line", () => {
+  it("serializes payload with id, type, and properties as valid JSON", () => {
     const raw = formatOpenCodeEvent("e", { num: 42, str: "hello" });
-    const match = raw.match(/\ndata: (.+)\n\n$/);
+    const match = raw.match(/^data: (.+)\n\n$/);
     expect(match).not.toBeNull();
-    expect(JSON.parse(match![1])).toEqual({ num: 42, str: "hello" });
+    const parsed = JSON.parse(match![1]);
+    expect(parsed.payload).toMatchObject({
+      type: "e",
+      properties: { num: 42, str: "hello" },
+    });
+    expect(parsed.payload.id).toMatch(/^evt_[0-9a-f]+$/i);
   });
 
-  it("id field contains a valid UUID v4", () => {
-    const raw = formatOpenCodeEvent("x", {});
-    const id = raw.match(/^id: (.+)\n/)?.[1];
-    expect(id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-    );
+  it("includes directory and project when directory is provided", () => {
+    const raw = formatOpenCodeEvent("e", {}, "/test/dir");
+    const parsed = JSON.parse(raw.slice(6));
+    expect(parsed.directory).toBe("/test/dir");
+    expect(parsed.project).toBe("global");
+    expect(parsed.payload.type).toBe("e");
   });
 });
 
@@ -121,11 +126,11 @@ describe("SSE event shapes", () => {
 
   it("emitSessionStatus -> session.status with {sessionID, status:{type}}", () => {
     unsub = subscribeOpenCodeEvents((e) => received.push(e));
-    emitSessionStatus("ses_id", { type: "processing" });
+    emitSessionStatus("ses_id", { type: "busy" });
     expect(received[0].type).toBe("session.status");
     expect(received[0].properties).toMatchObject({
       sessionID: "ses_id",
-      status: { type: "processing" },
+      status: { type: "busy" },
     });
   });
 
@@ -206,29 +211,31 @@ describe("SSE event shapes", () => {
 
 describe("createOpenCodeEventStream", () => {
   it("forwards emitted events as formatted SSE text", async () => {
-    const stream = createOpenCodeEventStream();
+    const stream = createOpenCodeEventStream("/workspace");
     const reader = stream.getReader();
     const decoder = new TextDecoder();
 
-    // Initial ": ok\n\n" heartbeat
+    // Initial server.connected event
     const init = await reader.read();
-    expect(decoder.decode(init.value)).toBe(": ok\n\n");
+    const initPayload = decoder.decode(init.value);
+    expect(initPayload).toMatch(/^data: /);
+    const parsedInit = JSON.parse(initPayload.slice(6));
+    expect(parsedInit.payload.type).toBe("server.connected");
 
     // Emit via the same path the proxy uses
-    emitSessionStatus("ses_test", { type: "running" });
+    emitSessionStatus("ses_test", { type: "busy" });
 
     const event = await reader.read();
     const payload = decoder.decode(event.value);
-    const lines = payload.split("\n", 4);
+    expect(payload).toMatch(/^data: /);
+    const parsed = JSON.parse(payload.slice(6));
 
-    expect(lines[0]).toMatch(/^id: \d+$/);
-    expect(lines[1]).toBe("event: session.status");
-    expect(lines[2]).toMatch(/^data: /);
-    expect(JSON.parse(lines[2].slice(6))).toEqual({
+    expect(parsed.payload.type).toBe("session.status");
+    expect(parsed.payload.properties).toEqual({
       sessionID: "ses_test",
-      status: { type: "running" },
+      status: { type: "busy" },
     });
-    expect(lines[3]).toBe("");
+    expect(parsed.directory).toBe("/workspace");
 
     reader.cancel();
   });
@@ -293,6 +300,7 @@ describe("mapRpcMessagesToOpenCodeRecords", () => {
 
     const part = toolParts[0]!;
     expect(part.type).toBe("tool");
+    expect(part.callID).toBe("call-1");
     expect(part.tool).toBe("readFile");
     expect(part.state.status).toBe("completed");
     expect(part.state.input).toEqual({ path: "test.txt" });
@@ -404,7 +412,16 @@ describe("mapRpcMessagesToOpenCodeRecords", () => {
     expect(records[0].info.providerID).toBe("anthropic");
     expect(records[0].info.modelID).toBe("claude-3");
     expect(records[0].info.variant).toBe("default");
+    expect(records[0].info.mode).toBe("primary");
+    expect(records[0].info.cost).toBe(0);
+    expect(records[0].info.tokens).toEqual({
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    });
     expect(records[0].info.model).toEqual({
+      id: "claude-3",
       providerID: "anthropic",
       modelID: "claude-3",
       variant: "default",

@@ -1,6 +1,8 @@
 {
-  "name": "openchamber-omp-proxy",
-  "version": "0.0.1",
+  "name": "omp-openchamber-server",
+  "version": "0.1.0",
+  "description": "OpenCode HTTP API proxy bridging OpenChamber to oh-my-pi (omp) RPC",
+  "repository": "https://github.com/alvins82/omp-openchamber-server",
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
@@ -9,7 +11,12 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "test": "bun test",
-    "check": "bun run --bun tsc --noEmit"
+    "check": "bun run --bun tsc --noEmit",
+    "test:live": "OC_LIVE=1 bun test src/integration.live.test.ts"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3"
+  }
 }

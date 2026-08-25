@@ -1,12 +1,25 @@
-import { OmpRpcConnection, getCurrentModel, type OmpRpcEvent } from "./rpc";
-import { invalidateMessageCache } from "./messages";
+import { OmpRpcConnection, getCurrentModel, type OmpRpcEvent, type OmpRpcTransport } from "./rpc";
+import { invalidateMessageCache, recordUserMessageId } from "./messages";
+import { promptLogger } from "./logger";
+import { getOmpSessionByOpenCodeId, setOmpSessionTitle } from "./sessions";
+import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
 import {
   emitMessagePartDelta,
   emitMessagePartUpdated,
   emitMessageUpdated,
   emitSessionIdle,
   emitSessionStatus,
+  emitSessionError,
+  emitPermissionAsked,
+  emitQuestionAsked,
 } from "./sse";
+import {
+  addPendingPermission,
+  addPendingQuestion,
+  clearSessionApprovals,
+  type PermissionRequest,
+  type QuestionRequest,
+} from "./approvals";
 import { randomUUID } from "node:crypto";
 
 interface OpenCodeTextPart {
@@ -30,7 +43,7 @@ interface ModelRef {
 }
 
 interface SessionState {
-  conn: OmpRpcConnection;
+  conn: OmpRpcTransport;
   busy: boolean;
   openCodeId: string;
   cwd: string;
@@ -39,11 +52,47 @@ interface SessionState {
   currentModel: ModelRef;
 }
 
+function sessionKey(openCodeId: string, cwd: string): string {
+  return `${openCodeId}\0${cwd}`;
+}
+
 const sessionStates = new Map<string, SessionState>();
 const sessionBusyLocks = new Set<string>();
 
-function sessionKey(openCodeId: string, cwd: string): string {
-  return `${openCodeId}\0${cwd}`;
+export function removeSessionState(openCodeId: string, cwd: string): void {
+  clearSessionApprovals(openCodeId);
+  const key = sessionKey(openCodeId, cwd);
+  const state = sessionStates.get(key);
+  if (state) {
+    state.unsubscribe();
+    try {
+      state.conn.kill();
+    } catch {
+      /* ignore */
+    }
+    sessionStates.delete(key);
+  }
+}
+
+/** Creates (and switches) the OMP transport for a new persistent session. */
+export type OmpConnectionFactory = (cwd: string, sessionPath: string) => Promise<OmpRpcTransport>;
+
+const defaultConnectionFactory: OmpConnectionFactory = async (cwd, sessionPath) => {
+  const conn = await OmpRpcConnection.spawn(cwd);
+  await conn.switchSession(sessionPath);
+  return conn;
+};
+
+let connectionFactory: OmpConnectionFactory = defaultConnectionFactory;
+
+/** Test seam: replace the transport factory (e.g. with a fake OMP). */
+export function setConnectionFactory(factory: OmpConnectionFactory): void {
+  connectionFactory = factory;
+}
+
+/** Restore the real OmpRpcConnection-based transport factory. */
+export function resetConnectionFactory(): void {
+  connectionFactory = defaultConnectionFactory;
 }
 
 async function acquireSessionLock(key: string): Promise<() => void> {
@@ -116,7 +165,11 @@ function emitAssistantInfo(
   parentID: string | undefined,
   model: ModelRef,
   finish?: "stop",
+  cwd?: string,
+  createdTime?: number,
 ): void {
+  const dir = cwd || process.cwd();
+  const created = createdTime ?? Date.now();
   emitMessageUpdated({
     info: {
       id: messageID,
@@ -124,7 +177,12 @@ function emitAssistantInfo(
       sessionID: openCodeId,
       parentID,
       agent: "omp",
+      mode: "primary",
+      cost: 0,
+      path: { cwd: dir, root: dir },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       model: {
+        id: model.modelID,
         providerID: model.providerID,
         modelID: model.modelID,
         variant: model.variant,
@@ -133,9 +191,9 @@ function emitAssistantInfo(
       modelID: model.modelID,
       variant: model.variant,
       finish,
-      time: { created: Date.now(), completed: finish ? Date.now() : undefined },
+      time: { created, completed: finish ? Date.now() : undefined },
     },
-  });
+  }, dir);
 }
 
 function emitAssistantPart(
@@ -144,14 +202,21 @@ function emitAssistantPart(
   partID: string,
   partType: "text" | "reasoning",
   text: string,
+  directory?: string,
+  startTime?: number,
 ): void {
-  emitMessagePartUpdated(openCodeId, {
-    id: partID,
-    type: partType,
-    text,
-    messageID,
-    sessionID: openCodeId,
-  });
+  emitMessagePartUpdated(
+    openCodeId,
+    {
+      id: partID,
+      type: partType,
+      text,
+      time: { start: startTime ?? Date.now() },
+      messageID,
+      sessionID: openCodeId,
+    },
+    directory,
+  );
 }
 
 export interface ToolPartState {
@@ -164,20 +229,70 @@ export interface ToolPartState {
 
 function parseToolInput(value: unknown): Record<string, unknown> | undefined {
   if (value == null) return undefined;
-  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
-  if (typeof value === "string") {
+  let parsed: Record<string, unknown> | undefined;
+  let descriptionHint: string | undefined;
+
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const hint = obj.intent ?? obj.i ?? (typeof obj.data === "object" && obj.data != null ? (obj.data as Record<string, unknown>).intent ?? (obj.data as Record<string, unknown>).i : undefined);
+    if (typeof hint === "string" && hint.length > 0) {
+      descriptionHint = hint;
+    }
+
+    if (obj.toolCall && typeof obj.toolCall === "object") {
+      const tc = obj.toolCall as Record<string, unknown>;
+      const inner = parseToolInput(tc.arguments ?? tc.args ?? tc.input);
+      if (inner) {
+        if (!inner.description && descriptionHint) inner.description = descriptionHint;
+        return inner;
+      }
+    }
+    if (obj.data && typeof obj.data === "object") {
+      const d = obj.data as Record<string, unknown>;
+      const inner = parseToolInput(d.args ?? d.arguments ?? d.input ?? d.parameters);
+      if (inner) {
+        if (!inner.description && descriptionHint) inner.description = descriptionHint;
+        return inner;
+      }
+    }
+    if (obj.args || obj.arguments || obj.input || obj.parameters || obj.params) {
+      const innerObj = obj.args ?? obj.arguments ?? obj.input ?? obj.parameters ?? obj.params;
+      const inner = parseToolInput(innerObj);
+      if (inner) {
+        if (!inner.description && descriptionHint) inner.description = descriptionHint;
+        return inner;
+      }
+    }
+    parsed = { ...obj };
+  } else if (typeof value === "string") {
     try {
-      const parsed = JSON.parse(value);
-      if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
+      const p = JSON.parse(value);
+      if (p != null && typeof p === "object" && !Array.isArray(p)) {
+        parsed = p as Record<string, unknown>;
       }
     } catch { /* ignore */ }
   }
-  return undefined;
+  if (parsed) {
+    if (!parsed.description && (parsed.intent || parsed.i || descriptionHint)) {
+      parsed.description = (parsed.intent ?? parsed.i ?? descriptionHint) as string;
+    }
+  }
+  return parsed;
 }
 
 function formatToolOutput(value: unknown): string | undefined {
   if (value == null) return undefined;
+  if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    if (obj.data && typeof obj.data === "object") {
+      const d = obj.data as Record<string, unknown>;
+      return formatToolOutput(d.result ?? d.output ?? d.partialResult ?? d.partial_result);
+    }
+    if ("result" in obj || "partialResult" in obj || "partial_result" in obj || "output" in obj || "content" in obj) {
+      const inner = obj.result ?? obj.partialResult ?? obj.partial_result ?? obj.output ?? obj.content;
+      return formatToolOutput(inner);
+    }
+  }
   if (typeof value === "string") return value;
   try {
     return JSON.stringify(value);
@@ -187,10 +302,11 @@ function formatToolOutput(value: unknown): string | undefined {
 }
 
 function getToolError(obj: Record<string, unknown>): string | undefined {
-  const value = obj.error ?? obj.errorMessage ?? obj.error_message;
+  const d = (typeof obj.data === "object" && obj.data != null ? obj.data : obj) as Record<string, unknown>;
+  const value = d.error ?? d.errorMessage ?? d.error_message ?? obj.error ?? obj.errorMessage ?? obj.error_message;
   if (typeof value === "string" && value.length > 0) return value;
-  if (obj.isError === true || obj.error === true) {
-    const detail = obj.output ?? obj.content ?? obj.result ?? "tool error";
+  if (d.isError === true || d.is_error === true || d.error === true || obj.isError === true || obj.is_error === true || obj.error === true) {
+    const detail = d.output ?? d.content ?? d.result ?? obj.output ?? obj.content ?? obj.result ?? "tool error";
     return typeof detail === "string" ? detail : "tool error";
   }
   return undefined;
@@ -203,24 +319,31 @@ export function reduceToolPartState(
 ): ToolPartState {
   const state: ToolPartState = current ? { ...current } : { status: "pending" };
   if (state.time) state.time = { ...state.time };
-  const type = event.type as string;
+  const type = ((event.type ?? event.customType) as string) || "";
 
-  if (type === "toolcall_start" || type === "toolcall_delta" || type === "toolcall_end") {
-    const input = parseToolInput(event.arguments ?? event.input);
-    if (input) state.input = input;
+  const input = parseToolInput(event.arguments ?? event.args ?? event.input ?? event.parameters ?? event.data ?? event);
+  if (input && Object.keys(input).length > 0) {
+    state.input = { ...state.input, ...input };
+  }
+
+  if (
+    type === "toolcall_start" ||
+    type === "toolcall_delta" ||
+    type === "toolcall_end" ||
+    type === "toolCall" ||
+    type === "tool_call"
+  ) {
     if (type !== "toolcall_delta" && !state.time) {
       state.time = { start: now };
     }
   } else if (type === "tool_execution_start") {
     state.status = "running";
     if (!state.time) state.time = { start: now };
-    const input = parseToolInput(event.arguments ?? event.input);
-    if (input) state.input = input;
   } else if (type === "tool_execution_update") {
     if (state.status !== "completed" && state.status !== "error") {
       state.status = "running";
     }
-    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.data);
+    const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.partialResult ?? event.partial_result ?? event.data);
     if (output != null) {
       if (state.output && !output.startsWith(state.output)) {
         state.output = state.output + "\n" + output;
@@ -245,13 +368,16 @@ export function reduceToolPartState(
   return state;
 }
 
-function createEventHandler(
+export function createEventHandler(
   openCodeId: string,
   parentMessageID: string | undefined,
   model: ModelRef,
   onComplete: () => void,
+  conn?: OmpRpcTransport,
+  cwd?: string,
 ) {
   let assistantMessageID: string | undefined;
+  let assistantStartTime: number | undefined;
   let currentPartType: "text" | "reasoning" | undefined;
   let partIndex = 0;
   let hasStarted = false;
@@ -261,50 +387,177 @@ function createEventHandler(
   const ensureStarted = () => {
     if (hasStarted) return;
     hasStarted = true;
-    assistantMessageID = makeMessageId(openCodeId, `assistant_${Date.now()}`);
-    emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model);
+    assistantStartTime = Date.now();
+    assistantMessageID = makeMessageId(openCodeId, `assistant_${assistantStartTime}`);
+    emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, undefined, cwd, assistantStartTime);
   };
 
   const getToolCallId = (obj: Record<string, unknown>): string | undefined => {
-    const value = obj.toolCallId ?? obj.tool_call_id ?? obj.callId ?? obj.id ?? obj.toolCallID;
+    if (typeof obj.toolCall === "object" && obj.toolCall != null) {
+      const id = getToolCallId(obj.toolCall as Record<string, unknown>);
+      if (id) return id;
+    }
+    if (typeof obj.data === "object" && obj.data != null) {
+      const id = getToolCallId(obj.data as Record<string, unknown>);
+      if (id) return id;
+    }
+    if (
+      typeof obj.partial === "object" &&
+      obj.partial != null &&
+      Array.isArray((obj.partial as { content?: unknown[] }).content)
+    ) {
+      const content = (obj.partial as { content: unknown[] }).content;
+      const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
+      const block = content[idx];
+      if (block && typeof block === "object") {
+        const id = getToolCallId(block as Record<string, unknown>);
+        if (id) return id;
+      }
+    }
+    const value = obj.toolCallId ?? obj.tool_call_id ?? obj.callId ?? obj.call_id ?? obj.id ?? obj.toolCallID;
     return typeof value === "string" && value.length > 0 ? value : undefined;
   };
 
-  const getToolName = (obj: Record<string, unknown>): string => {
+  const getToolName = (obj: Record<string, unknown>): string | undefined => {
+    if (typeof obj.toolCall === "object" && obj.toolCall != null) {
+      const name = getToolName(obj.toolCall as Record<string, unknown>);
+      if (name) return name;
+    }
+    if (typeof obj.data === "object" && obj.data != null) {
+      const name = getToolName(obj.data as Record<string, unknown>);
+      if (name) return name;
+    }
+    if (
+      typeof obj.partial === "object" &&
+      obj.partial != null &&
+      Array.isArray((obj.partial as { content?: unknown[] }).content)
+    ) {
+      const content = (obj.partial as { content: unknown[] }).content;
+      const idx = typeof obj.contentIndex === "number" ? obj.contentIndex : 0;
+      const block = content[idx];
+      if (block && typeof block === "object") {
+        const name = getToolName(block as Record<string, unknown>);
+        if (name) return name;
+      }
+    }
     const value = obj.name ?? obj.tool ?? obj.toolName ?? obj.tool_name ?? obj.function;
-    return typeof value === "string" && value.length > 0 ? value : "tool";
+    return typeof value === "string" && value.length > 0 ? value : undefined;
   };
 
-  const emitToolPart = (toolCallId: string, tool: string, state: ToolPartState) => {
+  const emitToolPart = (toolCallId: string, tool: string|undefined, state: ToolPartState) => {
     ensureStarted();
+    currentPartType = undefined;
     const mid = assistantMessageID!;
     const entry = toolParts.get(toolCallId);
+    const validTool = tool && tool !== "tool" ? tool : undefined;
     if (entry) {
-      entry.tool = tool;
+      if (validTool) entry.tool = validTool;
       entry.state = state;
     } else {
-      toolParts.set(toolCallId, { tool, state });
+      toolParts.set(toolCallId, { tool: validTool ?? "tool", state });
     }
+    const entryRef = toolParts.get(toolCallId);
     emitMessagePartUpdated(openCodeId, {
       id: toolCallId,
       type: "tool",
-      tool,
+      callID: toolCallId,
+      tool: entryRef && entryRef.tool !== "tool" ? entryRef.tool : (validTool ?? "tool"),
       state,
       messageID: mid,
       sessionID: openCodeId,
-    });
+    }, cwd);
   };
 
   return (event: OmpRpcEvent) => {
     const type = event.type;
     if (typeof type !== "string") return;
 
-    if (type === "agent_end" || (type === "prompt_result" && event.agentInvoked === false)) {
+    if (
+      (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
+      (type === "prompt_result" && event.agentInvoked === false)
+    ) {
       if (assistantMessageID) {
-        emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop");
+        emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
       }
       onComplete();
       return;
+    }
+
+    if (type === "extension_ui_request") {
+      const reqId = String(event.id ?? randomUUID());
+      const method = String(event.method ?? "confirm");
+      const title = String(event.title ?? "");
+      const message = String(event.message ?? "");
+
+      if (method === "confirm") {
+        const permReq: PermissionRequest = {
+          id: reqId,
+          sessionID: openCodeId,
+          permission: title || "execute",
+          patterns: [],
+          metadata: { message, title, ...event },
+          always: [],
+          tool: assistantMessageID ? { messageID: assistantMessageID, callID: reqId } : undefined,
+          directory: cwd,
+        };
+        addPendingPermission(permReq, (res) => {
+          conn?.sendFrame?.({
+            type: "extension_ui_response",
+            id: reqId,
+            ...(res.cancelled ? { cancelled: true } : { confirmed: res.confirmed ?? true }),
+          });
+        });
+        emitPermissionAsked(permReq as unknown as Record<string, unknown>, cwd);
+      } else if (method === "select" || method === "input") {
+        const rawOptions = (event.options ?? []) as Array<string | { label?: string; value?: string; description?: string }>;
+        const options = rawOptions.map((opt) =>
+          typeof opt === "string"
+            ? { label: opt, description: "" }
+            : { label: opt.label ?? opt.value ?? "", description: opt.description ?? "" }
+        );
+        const qReq: QuestionRequest = {
+          id: reqId,
+          sessionID: openCodeId,
+          questions: [
+            {
+              question: message || title || "Input requested",
+              header: title || "Prompt",
+              options,
+              multiple: false,
+              custom: method === "input",
+            },
+          ],
+          tool: assistantMessageID ? { messageID: assistantMessageID, callID: reqId } : undefined,
+          directory: cwd,
+        };
+        addPendingQuestion(qReq, (res) => {
+          conn?.sendFrame?.({
+            type: "extension_ui_response",
+            id: reqId,
+            value: res.value ?? "",
+            ...(res.cancelled ? { cancelled: true } : {}),
+          });
+        });
+        emitQuestionAsked(qReq as unknown as Record<string, unknown>, cwd);
+      }
+      return;
+    }
+
+    if (type === "custom") {
+      const customType = typeof event.customType === "string" ? event.customType : "";
+      if (
+        customType === "tool_execution_start" ||
+        customType === "tool_execution_update" ||
+        customType === "tool_execution_end"
+      ) {
+        const payload = ((typeof event.data === "object" && event.data != null ? event.data : event) as Record<string, unknown>);
+        const toolCallId = getToolCallId(payload) ?? getToolCallId(event) ?? `tool_${randomUUID().replace(/-/g, "")}`;
+        const tool = getToolName(payload) ?? getToolName(event);
+        const existing = toolParts.get(toolCallId);
+        const state = reduceToolPartState(existing?.state, { type: customType, ...payload }, Date.now());
+        emitToolPart(toolCallId, tool, state);
+        return;
+      }
     }
 
     if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
@@ -335,15 +588,19 @@ function createEventHandler(
       if (currentPartType !== partType) {
         partIndex++;
         currentPartType = partType;
-        emitAssistantPart(openCodeId, mid, makePartId(openCodeId, mid, partIndex), partType, deltaText);
+        emitAssistantPart(openCodeId, mid, makePartId(openCodeId, mid, partIndex), partType, deltaText, cwd);
       } else if (deltaText) {
-        emitMessagePartDelta(openCodeId, mid, makePartId(openCodeId, mid, partIndex), deltaText);
+        emitMessagePartDelta(openCodeId, mid, makePartId(openCodeId, mid, partIndex), deltaText, cwd);
       }
       return;
     }
 
-    if (typeof eventType === "string" && eventType.startsWith("toolcall_")) {
+    if (
+      typeof eventType === "string" &&
+      (eventType.startsWith("toolcall_") || eventType === "toolCall" || eventType === "tool_call")
+    ) {
       ensureStarted();
+      currentPartType = undefined;
       const toolCallId = getToolCallId(assistantMessageEvent) ?? `tool_${randomUUID().replace(/-/g, "")}`;
       const tool = getToolName(assistantMessageEvent);
       const existing = toolParts.get(toolCallId);
@@ -363,8 +620,7 @@ async function getOrCreateSessionState(
   const existing = sessionStates.get(key);
   if (existing) return existing;
 
-  const conn = await OmpRpcConnection.spawn(cwd);
-  await conn.switchSession(sessionPath);
+  const conn = await connectionFactory(cwd, sessionPath);
 
   const modelFromRpc = await getCurrentModel(conn).catch(() => undefined);
 
@@ -423,10 +679,46 @@ export async function promptSessionAsync(
         }
       : undefined;
 
+    if (modelRef) {
+      state.currentModel = defaultModelRef(modelRef);
+    }
+
+    if (parentMessageID) {
+      recordUserMessageId(openCodeId, promptText, parentMessageID);
+      const userMsgTime = Date.now() - 1;
+      emitMessageUpdated(
+        {
+          info: {
+            id: parentMessageID,
+            sessionID: openCodeId,
+            role: "user",
+            agent: "omp",
+            model: {
+              id: state.currentModel.modelID,
+              providerID: state.currentModel.providerID,
+              modelID: state.currentModel.modelID,
+              variant: state.currentModel.variant,
+            },
+            time: { created: userMsgTime, completed: userMsgTime },
+          },
+        },
+        cwd,
+      );
+      emitMessagePartUpdated(
+        openCodeId,
+        {
+          id: `part_${openCodeId}_${parentMessageID}_0`,
+          type: "text",
+          text: promptText,
+          messageID: parentMessageID,
+          sessionID: openCodeId,
+        },
+        cwd,
+      );
+    }
+
     (async () => {
       try {
-        state.currentModel = modelRef ? defaultModelRef(modelRef) : state.currentModel;
-
         if (modelRef) {
           try {
             await state.conn.request("set_model", {
@@ -434,7 +726,7 @@ export async function promptSessionAsync(
               modelId: modelRef.modelID,
             });
           } catch (err) {
-            console.error(`[prompt] ${openCodeId} set_model failed:`, err);
+            promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} set_model failed`);
           }
         }
 
@@ -449,17 +741,34 @@ export async function promptSessionAsync(
 
         state.unsubscribe();
         state.unsubscribe = state.conn.onEvent(
-          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete),
+          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, state.conn, cwd),
         );
 
         await state.conn.request("prompt", { message: promptText });
         await completion;
+
+        if (!isLowSignalTitleInput(promptText)) {
+          (async () => {
+            try {
+              const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
+              if (session && (!session.title || session.title.startsWith("Session "))) {
+                const titleCandidate = normalizeGeneratedTitle(promptText, promptText);
+                if (titleCandidate) {
+                  await setOmpSessionTitle(openCodeId, titleCandidate, "auto", cwd);
+                }
+              }
+            } catch {
+              // best effort background title generation
+            }
+          })();
+        }
       } catch (err) {
         const messageID = makeMessageId(openCodeId, `error_${Date.now()}`);
         const errorModel = state.currentModel;
-        emitAssistantInfo(openCodeId, messageID, parentMessageID, errorModel, "stop");
+        emitSessionError(openCodeId, err, cwd);
+        emitAssistantInfo(openCodeId, messageID, parentMessageID, errorModel, "stop", cwd);
         emitAssistantPart(openCodeId, messageID, makePartId(openCodeId, messageID, 0), "text", `Prompt failed: ${err instanceof Error ? err.message : String(err)}`);
-        console.error(`[prompt] ${openCodeId} failed:`, err);
+        promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} failed`);
       } finally {
         state.unsubscribe();
         state.busy = false;
@@ -483,7 +792,7 @@ export async function abortSession(openCodeId: string, cwd: string): Promise<boo
     try {
       await state.conn.request("abort", {});
     } catch (err) {
-      console.error(`[abort] ${openCodeId} RPC abort failed:`, err);
+      promptLogger.error({ err, sessionID: openCodeId }, `[abort] ${openCodeId} RPC abort failed`);
       state.conn.kill();
       sessionStates.delete(key);
     }
@@ -506,4 +815,20 @@ export function getSessionStatusMap(): Record<string, { type: string }> {
     if (state.busy) result[state.openCodeId] = { type: "busy" };
   }
   return result;
+}
+
+/** Kill every persistent OMP child and ephemeral RPC process; used on process shutdown. */
+export function shutdownAll(): void {
+  for (const [key, state] of sessionStates) {
+    try {
+      state.unsubscribe();
+      state.busy = false;
+      state.conn.kill();
+    } catch {
+      /* ignore */
+    }
+    sessionStates.delete(key);
+  }
+  sessionBusyLocks.clear();
+  OmpRpcConnection.killAll();
 }
