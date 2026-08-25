@@ -5,15 +5,20 @@
  * postmortems). Fixtures use the exact on-disk shapes captured from real
  * `~/.omp/agent/sessions` files.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, beforeEach } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadMessagesFromFile, type OpenCodeTextPart } from "./messages";
+import {
+  loadMessagesFromFile,
+  clearRecordedUserMessagesMemoryCache,
+  type OpenCodeTextPart,
+} from "./messages";
 
 const SID = "01234567-89ab-cdef-0123-456789abcdef";
 const TMP = mkdtempSync(join(tmpdir(), "msgfile-test-"));
+const TEST_DB = join(TMP, "history.db");
 
 function fileFor(name: string, lines: unknown[]): string {
   const path = join(TMP, name);
@@ -32,14 +37,18 @@ const asstMsg = (id: string, content: unknown[], ts = 1755927605000) => ({
 });
 
 describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
+  beforeEach(() => {
+    clearRecordedUserMessagesMemoryCache();
+  });
+
   it("returns null when the file does not exist", async () => {
-    expect(await loadMessagesFromFile(join(TMP, "does-not-exist.jsonl"), SID)).toBeNull();
+    expect(await loadMessagesFromFile(join(TMP, "does-not-exist.jsonl"), SID, TEST_DB)).toBeNull();
   });
 
   it("returns null for an empty or blank file", async () => {
-    expect(await loadMessagesFromFile(fileFor("empty.jsonl", []), SID)).toBeNull();
+    expect(await loadMessagesFromFile(fileFor("empty.jsonl", []), SID, TEST_DB)).toBeNull();
     writeFileSync(join(TMP, "blank.jsonl"), "\n\n");
-    expect(await loadMessagesFromFile(join(TMP, "blank.jsonl"), SID)).toBeNull();
+    expect(await loadMessagesFromFile(join(TMP, "blank.jsonl"), SID, TEST_DB)).toBeNull();
   });
 
   it("returns null when the file holds only non-message entries", async () => {
@@ -50,7 +59,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       { type: "thinking_level_change", level: "default" },
       { type: "session_exit", status: 143, timestamp: "2026-08-23T00:00:00.000Z" },
     ]);
-    expect(await loadMessagesFromFile(path, SID)).toBeNull();
+    expect(await loadMessagesFromFile(path, SID, TEST_DB)).toBeNull();
   });
   it("maps user and assistant messages in file order", async () => {
     const path = fileFor("basic.jsonl", [
@@ -58,7 +67,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       userMsg("m1", "hello", 1755927600000),
       asstMsg("m2", [{ type: "text", text: "hi there" }], 1755927605000),
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out).toHaveLength(2);
     expect(out![0].info.sessionID).toBe(SID);
     expect(out![0].info.id).toBe("msg_" + SID + "_m1");
@@ -80,7 +89,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       { type: "message", id: "e1", timestamp: "2026-08-23T02:00:00.000Z",
         message: { role: "user", content: "x" } },
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out).toHaveLength(1);
     expect(out![0].info.id).toBe("msg_" + SID + "_e1");
     expect(out![0].info.time.created).toBe(Date.parse("2026-08-23T02:00:00.000Z"));
@@ -92,7 +101,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       { type: "message", id: "m4", timestamp: "2026-08-23T01:00:06.000Z",
         message: { role: "toolResult", toolCallId: "call_1", toolName: "bash", content: "a.txt", timestamp: 1755927606000 } },
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out).toHaveLength(1);
     expect(out![0].info.role).toBe("assistant");
     expect(out![0].parts).toHaveLength(1);
@@ -120,7 +129,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
         },
       },
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     const part = out![0].parts[0] as {
       state: { status: string; error?: string };
     };
@@ -143,7 +152,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
         },
       },
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out![0].parts.map((x) => x.type)).toEqual([
       "reasoning", "text",
     ]);
@@ -164,7 +173,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       JSON.stringify(userMsg("m8", "ok")) + "\n" +
       '{' + '"type":"message","id":"m9","me' + "\n",
     );
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out).toHaveLength(1);
     expect(out![0].info.id).toBe("msg_" + SID + "_m8");
   });
@@ -174,7 +183,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       userMsg("m10", "do it"),
       asstMsg("m11", []),
     ]);
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
     expect(out).toHaveLength(2);
     expect(out![1].info.finish).toBe("stop");
     expect(out![1].parts).toHaveLength(1);
@@ -188,12 +197,13 @@ expect(p1.text).toBe("(empty)");
     const path = fileFor("orphan" + ".js" + "nl", [
       { type: "message", id: "orphan" },
     ]);
-    expect(await loadMessagesFromFile(path, SID)).toBeNull();
+    expect(await loadMessagesFromFile(path, SID, TEST_DB)).toBeNull();
   });
 
   it("preserves historical user message IDs and only maps matching/latest prompt ID", async () => {
     const { recordUserMessageId } = await import("./messages");
-    recordUserMessageId(SID, "Am i in live view?", "msg_optimistic_live_view");
+    const multiSid = "01234567-89ab-cdef-0123-multiturn0001";
+    recordUserMessageId(multiSid, "Am i in live view?", "msg_optimistic_live_view", TEST_DB);
 
     const path = fileFor("multiturn.jsonl", [
       userMsg("u1", "hi", 1755927600000),
@@ -204,13 +214,47 @@ expect(p1.text).toBe("(empty)");
       asstMsg("a3", [{ type: "text", text: "Yes, you are." }], 1755927625000),
     ]);
 
-    const out = await loadMessagesFromFile(path, SID);
+    const out = await loadMessagesFromFile(path, multiSid, TEST_DB);
     expect(out).toHaveLength(6);
-    expect(out![0].info.id).toBe("msg_" + SID + "_u1");
+    expect(out![0].info.id).toBe("msg_" + multiSid + "_u1");
     expect(out![0].info.role).toBe("user");
-    expect(out![2].info.id).toBe("msg_" + SID + "_u2");
+    expect(out![2].info.id).toBe("msg_" + multiSid + "_u2");
     expect(out![2].info.role).toBe("user");
     expect(out![4].info.id).toBe("msg_optimistic_live_view");
     expect(out![4].info.role).toBe("user");
   });
+
+  it("persists client message IDs across complete in-memory cache clear (proxy restart simulation)", async () => {
+    const {
+      recordUserMessageId,
+      clearRecordedUserMessagesMemoryCache,
+    } = await import("./messages");
+    const testDbPath = join(TMP, "test-history.db");
+    const restartSid = "sess-restart-test-uuid";
+
+    // Client sends "Go" with clientMessageId msg_019_go
+    recordUserMessageId(restartSid, "Go", "msg_019_go", testDbPath);
+
+    // Simulate proxy process shutdown & restart -> memory cache is wiped clean!
+    clearRecordedUserMessagesMemoryCache();
+
+    // Session JSONL on disk written by OMP with internal ID '32f41a56'
+    const path = fileFor("restart-session.jsonl", [
+      userMsg("32f41a56", "Go", 1787641974135),
+      asstMsg("338e55b2", [{ type: "text", text: "Turn output here" }], 1787641975000),
+    ]);
+
+    // Reconnecting client calls loadMessagesFromFile
+    const out = await loadMessagesFromFile(path, restartSid, testDbPath);
+    expect(out).toHaveLength(2);
+
+    // User message ID MUST be msg_019_go (the original client ID), NOT a fallback duplicate!
+    expect(out![0].info.id).toBe("msg_019_go");
+    expect(out![0].info.role).toBe("user");
+
+    // Assistant message parentID MUST point to msg_019_go
+    expect(out![1].info.parentID).toBe("msg_019_go");
+    expect(out![1].info.role).toBe("assistant");
+  });
 });
+

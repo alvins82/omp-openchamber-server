@@ -182,13 +182,17 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     });
     expect(promptResp.status).toBe(200);
 
-    // Wait a brief tick for prompt to be processed
-    await new Promise((r) => setTimeout(r, 100));
+    // Poll until the prompt turn settles and GET /session/:id/message returns the client message
+    let userMsg: { info: { id: string; role: string } } | undefined;
+    const start = Date.now();
+    while (Date.now() - start < 3000) {
+      const msgsResp = await fetch(`${BASE}session/${sessionId}/message?directory=${encodeURIComponent(testDir)}`);
+      const messages = (await msgsResp.json()) as Array<{ info: { id: string; role: string } }>;
+      userMsg = messages.find((m) => m.info.role === "user");
+      if (userMsg?.info?.id === clientMessageId) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
-    // Verify GET /session/:id/message returns the user message with the EXACT clientMessageId
-    const msgsResp = await fetch(`${BASE}session/${sessionId}/message?directory=${encodeURIComponent(testDir)}`);
-    const messages = (await msgsResp.json()) as Array<{ info: { id: string; role: string } }>;
-    const userMsg = messages.find((m) => m.info.role === "user");
     expect(userMsg).toBeDefined();
     expect(userMsg!.info.id).toBe(clientMessageId);
   });

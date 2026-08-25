@@ -103,6 +103,8 @@ function runLongTurn(id) {
   }, 1200);
 }
 
+let lastPrompt = "seeded via rpc";
+
 function handleFrame(frame) {
   const { id, type } = frame;
   switch (type) {
@@ -140,7 +142,7 @@ function handleFrame(frame) {
       break;
     case "get_messages":
       respond(id, [
-        { id: "mock_m1", role: "user", content: "seeded via rpc", timestamp: 1755930000000 },
+        { id: "mock_m1", role: "user", content: lastPrompt, timestamp: 1755930000000 },
         {
           id: "mock_m2",
           role: "assistant",
@@ -154,6 +156,7 @@ function handleFrame(frame) {
       break;
     case "prompt": {
       const message = typeof frame.message === "string" ? frame.message : "";
+      lastPrompt = message || "seeded via rpc";
       inTurn = true;
       if (message.includes("MOCKFAIL")) {
         // Silent provider failure: no events at all; the response alone lets

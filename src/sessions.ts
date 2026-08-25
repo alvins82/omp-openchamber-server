@@ -10,6 +10,7 @@ import {
 } from "./title";
 import {
   deleteIndexedTitle,
+  deletePersistedMessageIds,
   lookupIndexedTitle,
   recordIndexedTitle,
   searchMatchingSessionIds,
@@ -284,6 +285,8 @@ export async function deleteOmpSession(
   if (!session) return false;
   try {
     deleteIndexedTitle(fromOpenCodeSessionId(openCodeId));
+    deletePersistedMessageIds(openCodeId);
+    deletePersistedMessageIds(fromOpenCodeSessionId(openCodeId));
     await unlink(session.path);
     return true;
   } catch {

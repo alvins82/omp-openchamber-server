@@ -2,6 +2,11 @@ import { readFile } from "node:fs/promises";
 import { withOmpRpc } from "./rpc";
 import { getOmpSessionByOpenCodeId } from "./sessions";
 import { sessionLogger } from "./logger";
+import {
+  bindPersistedOmpMessageId,
+  listPersistedMessageIds,
+  recordPersistedMessageId,
+} from "./title-db";
 
 export interface OpenCodeMessageRecord {
   info: {
@@ -305,17 +310,55 @@ interface RecordedUserMessage {
   text: string;
   clientMessageId: string;
   timestamp: number;
+  ompMessageId?: string;
 }
 
 const recordedUserMessagesBySession = new Map<string, RecordedUserMessage[]>();
 
-export function recordUserMessageId(openCodeId: string, promptTextOrMessageId: string, messageId?: string): void {
+export function clearRecordedUserMessagesMemoryCache(openCodeId?: string): void {
+  if (openCodeId) {
+    recordedUserMessagesBySession.delete(openCodeId);
+  } else {
+    recordedUserMessagesBySession.clear();
+  }
+}
+
+export function recordUserMessageId(
+  openCodeId: string,
+  promptTextOrMessageId: string,
+  messageId?: string,
+  dbPath?: string,
+): void {
   const actualMessageId = messageId ?? promptTextOrMessageId;
   const promptText = messageId ? promptTextOrMessageId : "";
+  const now = Date.now();
   const list = recordedUserMessagesBySession.get(openCodeId) ?? [];
   const filtered = list.filter((item) => item.clientMessageId !== actualMessageId);
-  filtered.push({ text: promptText.trim(), clientMessageId: actualMessageId, timestamp: Date.now() });
+  filtered.push({ text: promptText.trim(), clientMessageId: actualMessageId, timestamp: now });
   recordedUserMessagesBySession.set(openCodeId, filtered);
+
+  recordPersistedMessageId(openCodeId, actualMessageId, promptText.trim(), now, undefined, dbPath);
+}
+
+function getRecordedUserMessages(openCodeId: string, dbPath?: string): RecordedUserMessage[] {
+  const inMemory = recordedUserMessagesBySession.get(openCodeId);
+  if (inMemory && inMemory.length > 0) {
+    return inMemory;
+  }
+
+  const persisted = listPersistedMessageIds(openCodeId, dbPath);
+  if (persisted.length > 0) {
+    const list: RecordedUserMessage[] = persisted.map((p) => ({
+      text: p.promptText,
+      clientMessageId: p.clientMessageId,
+      timestamp: p.createdAt,
+      ompMessageId: p.ompMessageId,
+    }));
+    recordedUserMessagesBySession.set(openCodeId, list);
+    return list;
+  }
+
+  return [];
 }
 
 function extractUserMessageText(msg: AgentMessage): string {
@@ -333,14 +376,17 @@ function extractUserMessageText(msg: AgentMessage): string {
 export function mapRpcMessagesToOpenCodeRecords(
   messages: AgentMessage[],
   openCodeId: string,
+  dbPath?: string,
 ): OpenCodeMessageRecord[] {
   const records: OpenCodeMessageRecord[] = [];
   let lastUserMessageId: string | undefined;
   let lastAssistantRecord: OpenCodeMessageRecord | undefined;
   let visibleIndex = 0;
-  const recordedList = recordedUserMessagesBySession.get(openCodeId) ?? [];
+  const recordedList = getRecordedUserMessages(openCodeId, dbPath);
+  const matchedRecordedIndices = new Set<number>();
+  let userMessageIndex = 0;
+
   const userMessages = messages.filter((m) => openCodeRoleFor(m) === "user");
-  const lastUserMsg = userMessages.length > 0 ? userMessages[userMessages.length - 1] : undefined;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -359,15 +405,57 @@ export function mapRpcMessagesToOpenCodeRecords(
     let messageId: string;
     if (role === "user") {
       const msgText = extractUserMessageText(msg);
-      const matched = (msgText && recordedList.find((r) => r.text === msgText))
-        ?? (msg === lastUserMsg && recordedList.length > 0 ? recordedList[recordedList.length - 1] : undefined);
-      if (matched) {
-        messageId = matched.clientMessageId;
+      let matchedIndex = -1;
+
+      // 1. Direct OMP message ID match if already bound
+      if (typeof msg.id === "string" && msg.id.length > 0) {
+        matchedIndex = recordedList.findIndex(
+          (r, idx) => !matchedRecordedIndices.has(idx) && r.ompMessageId === msg.id,
+        );
+      }
+
+      // 2. Exact prompt text match
+      if (matchedIndex === -1 && msgText) {
+        if (
+          userMessageIndex < recordedList.length &&
+          !matchedRecordedIndices.has(userMessageIndex) &&
+          recordedList[userMessageIndex].text === msgText
+        ) {
+          matchedIndex = userMessageIndex;
+        } else {
+          matchedIndex = recordedList.findIndex(
+            (r, idx) => !matchedRecordedIndices.has(idx) && r.text === msgText,
+          );
+        }
+      }
+
+      // 3. Positional match when session user message count matches or candidate text is empty
+      if (
+        matchedIndex === -1 &&
+        userMessageIndex < recordedList.length &&
+        !matchedRecordedIndices.has(userMessageIndex) &&
+        (!recordedList[userMessageIndex].text || recordedList.length === userMessages.length)
+      ) {
+        matchedIndex = userMessageIndex;
+      }
+
+      if (matchedIndex !== -1) {
+        matchedRecordedIndices.add(matchedIndex);
+        const match = recordedList[matchedIndex];
+        messageId = match.clientMessageId;
+
+        // If not yet bound to omp_message_id, bind it now in SQLite & memory
+        if (typeof msg.id === "string" && msg.id.length > 0 && match.ompMessageId !== msg.id) {
+          match.ompMessageId = msg.id;
+          bindPersistedOmpMessageId(openCodeId, match.clientMessageId, msg.id, dbPath);
+        }
       } else if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
         messageId = msg.id;
       } else {
         messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
       }
+
+      userMessageIndex++;
     } else {
       if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
         messageId = msg.id;
@@ -447,6 +535,7 @@ function extractMessagesFromRpcResponse(raw: unknown): unknown {
 export async function loadMessagesFromFile(
   sessionPath: string,
   openCodeId: string,
+  dbPath?: string,
 ): Promise<OpenCodeMessageRecord[] | null> {
   let text: string;
   try {
@@ -486,10 +575,10 @@ export async function loadMessagesFromFile(
   }
 
   if (messages.length === 0) return null;
-  return mapRpcMessagesToOpenCodeRecords(messages, openCodeId);
+  return mapRpcMessagesToOpenCodeRecords(messages, openCodeId, dbPath);
 }
 
-async function loadFromRpc(openCodeId: string, cwd: string): Promise<OpenCodeMessageRecord[]> {
+async function loadFromRpc(openCodeId: string, cwd: string, dbPath?: string): Promise<OpenCodeMessageRecord[]> {
   const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
   if (!session) {
     sessionLogger.error({ sessionID: openCodeId, cwd }, `no session found for ${openCodeId} in ${cwd}`);
@@ -503,13 +592,14 @@ async function loadFromRpc(openCodeId: string, cwd: string): Promise<OpenCodeMes
     if (!Array.isArray(messages)) {
       throw new Error(`RPC get_messages returned unexpected ${typeof messages}`);
     }
-    return mapRpcMessagesToOpenCodeRecords(messages as AgentMessage[], openCodeId);
+    return mapRpcMessagesToOpenCodeRecords(messages as AgentMessage[], openCodeId, dbPath);
   });
 }
 
 export async function loadSessionMessages(
   openCodeId: string,
   cwd: string,
+  dbPath?: string,
 ): Promise<OpenCodeMessageRecord[]> {
   const key = cacheKey(openCodeId, cwd);
   const now = Date.now();
@@ -526,9 +616,9 @@ export async function loadSessionMessages(
     if (!session) {
       throw new Error(`no session found for ${openCodeId} in ${cwd}`);
     }
-    const fromFile = await loadMessagesFromFile(session.path, openCodeId);
+    const fromFile = await loadMessagesFromFile(session.path, openCodeId, dbPath);
     if (fromFile) return fromFile;
-    return loadFromRpc(openCodeId, cwd);
+    return loadFromRpc(openCodeId, cwd, dbPath);
   })().catch((err) => {
     throw new Error(`Failed to load messages for ${openCodeId}: ${err instanceof Error ? err.message : String(err)}`);
   });
