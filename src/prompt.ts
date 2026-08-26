@@ -986,7 +986,7 @@ export async function promptSessionAsync(
 
     state.busy = true;
     invalidateMessageCache(openCodeId, cwd);
-    emitSessionStatus(openCodeId, { type: "busy" });
+    emitSessionStatus(openCodeId, { type: "busy" }, cwd);
 
     const parentMessageID = body.messageID;
     const modelRef = body.model?.providerID && body.model?.modelID
@@ -1090,7 +1090,8 @@ export async function promptSessionAsync(
       } finally {
         state.unsubscribe();
         state.busy = false;
-        emitSessionIdle(openCodeId);
+        emitSessionStatus(openCodeId, { type: "idle" }, cwd);
+        emitSessionIdle(openCodeId, cwd);
       }
     })();
 
@@ -1116,7 +1117,8 @@ export async function abortSession(openCodeId: string, cwd: string): Promise<boo
     }
     state.unsubscribe();
     state.busy = false;
-    emitSessionIdle(openCodeId);
+    emitSessionStatus(openCodeId, { type: "idle" }, cwd);
+    emitSessionIdle(openCodeId, cwd);
     return true;
   } finally {
     release();

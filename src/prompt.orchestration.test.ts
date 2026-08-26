@@ -204,8 +204,9 @@ describe("promptSessionAsync orchestration", () => {
     stop();
 
     const status = events.filter((e) => e.type === "session.status");
-    expect(status).toHaveLength(1);
+    expect(status).toHaveLength(2);
     expect(status[0].properties).toEqual({ sessionID: openCodeId, status: { type: "busy" } });
+    expect(status[1].properties).toEqual({ sessionID: openCodeId, status: { type: "idle" } });
 
     const updated = events.filter((e) => e.type === "message.updated");
     expect(updated).toHaveLength(2);
