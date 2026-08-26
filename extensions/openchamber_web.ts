@@ -6,7 +6,12 @@ export default function openchamberWebExtension(pi: any) {
       description:
         "The browser action to perform: browser.open, browser.snapshot, browser.click, browser.type, browser.scroll, browser.resize, browser.capture, browser.inspect, browser.back, or browser.forward",
     }),
-    url: Type.Optional(Type.String({ description: "URL to open in the browser panel (for browser.open)" })),
+    url: Type.Optional(
+      Type.String({
+        description:
+          "URL or local file path to open in the browser panel (for browser.open, e.g. http://localhost:3000, index.html, ./preview.html, or file:///path/to/file.html)",
+      }),
+    ),
     selector: Type.Optional(Type.String({ description: "CSS selector or text target (for snapshot, click, type, scroll, inspect)" })),
     text: Type.Optional(Type.String({ description: "Visible text label to match a button or link (for browser.click)" })),
     value: Type.Optional(Type.String({ description: "Text value to fill into an input field (for browser.type)" })),
@@ -21,7 +26,7 @@ export default function openchamberWebExtension(pi: any) {
     name: "openchamber_web",
     label: "OpenChamber In-App Browser",
     description:
-      "Open, view, and interact with live web pages inside OpenChamber's in-app browser panel. Use this to open local dev servers (e.g. http://localhost:3000) or external URLs, read page DOM/text with browser.snapshot, click elements with browser.click, type inputs with browser.type, scroll with browser.scroll, and take screenshots with browser.capture.",
+      "Open, view, and interact with live web pages and local HTML files inside OpenChamber's in-app browser panel. Use this to open local HTML files (e.g. index.html, file:///path/to/file.html), local dev servers (e.g. http://localhost:3000), or external URLs, read page DOM/text with browser.snapshot, click elements with browser.click, type inputs with browser.type, scroll with browser.scroll, and take screenshots with browser.capture.",
     loadMode: "essential",
     approval: "read",
     parameters: OpenChamberWebSchema,

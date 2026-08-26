@@ -317,7 +317,12 @@ const server = Bun.serve({
         const action = body?.action?.trim() || "";
         if (!action) return jsonError("action is required", 400);
         try {
-          const data = await browserControlBroker.request(action, body?.parameters ?? {}, { timeoutMs: body?.timeoutMs });
+          const sidecarPort = Number(process.env.OC_SIDECAR_PORT ?? 4096);
+          const data = await browserControlBroker.request(action, body?.parameters ?? {}, {
+            timeoutMs: body?.timeoutMs,
+            baseDir: effectiveDir,
+            port: sidecarPort,
+          });
           return json({ ok: true, data });
         } catch (err) {
           const status = err instanceof BrowserControlError ? err.status : 500;
