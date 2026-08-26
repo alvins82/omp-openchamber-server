@@ -386,7 +386,7 @@ export async function setOmpSessionTitle(
 
     session.title = cleanTitle;
     session.time.updated = Date.now();
-    emitSessionUpdated(session as unknown as Record<string, unknown>);
+    emitSessionUpdated(session as unknown as Record<string, unknown>, session.directory);
     return session;
   } catch {
     return null;
@@ -420,7 +420,7 @@ export async function updateOmpSession(
       await appendFile(session.path, metadataEntry);
       session.metadata = { ...(session.metadata || {}), ...updates.metadata };
       session.time.updated = Date.now();
-      emitSessionUpdated(session as unknown as Record<string, unknown>);
+      emitSessionUpdated(session as unknown as Record<string, unknown>, session.directory);
     } catch {
       // ignore
     }
@@ -438,7 +438,7 @@ export async function updateOmpSession(
       await appendFile(session.path, archiveEntry);
       session.time = { ...session.time, archived: archivedVal };
       session.time.updated = Date.now();
-      emitSessionUpdated(session as unknown as Record<string, unknown>);
+      emitSessionUpdated(session as unknown as Record<string, unknown>, session.directory);
     } catch {
       // ignore
     }

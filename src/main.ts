@@ -981,14 +981,21 @@ const MIME_TYPES: Record<string, string> = {
     if (goalObjMatch) {
       const sessionId = decodeURIComponent(goalObjMatch[1]);
       const home = Bun.env.HOME || process.env.HOME || "/tmp";
-      const goalsDir = join(home, ".omp", "goals");
-      const goalPath = join(goalsDir, `${sessionId}.txt`);
+      const ocDataDir = Bun.env.OPENCHAMBER_DATA_DIR || process.env.OPENCHAMBER_DATA_DIR;
+      const ocGoalsDir = ocDataDir ? join(ocDataDir, "goals") : join(home, ".config", "openchamber", "goals");
+      const ompGoalsDir = join(home, ".omp", "goals");
+
+      const ocGoalPath = join(ocGoalsDir, `${sessionId}.md`);
+      const ompGoalPath = join(ompGoalsDir, `${sessionId}.txt`);
 
       if (req.method === "PUT") {
         try {
-          await mkdir(goalsDir, { recursive: true });
+          await mkdir(ocGoalsDir, { recursive: true });
+          await mkdir(ompGoalsDir, { recursive: true });
           const body = (await readJson(req)) as { content?: string } | undefined;
-          await Bun.write(goalPath, body?.content ?? "");
+          const text = body?.content ?? "";
+          await Bun.write(ocGoalPath, text);
+          await Bun.write(ompGoalPath, text);
           return json({ ok: true });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "failed to write objective", 500);
@@ -997,9 +1004,14 @@ const MIME_TYPES: Record<string, string> = {
 
       if (req.method === "GET") {
         try {
-          const file = Bun.file(goalPath);
-          if (await file.exists()) {
-            const content = await file.text();
+          const ocFile = Bun.file(ocGoalPath);
+          if (await ocFile.exists()) {
+            const content = await ocFile.text();
+            return json({ content });
+          }
+          const ompFile = Bun.file(ompGoalPath);
+          if (await ompFile.exists()) {
+            const content = await ompFile.text();
             return json({ content });
           }
           return jsonError("objective not found", 404);
@@ -1010,7 +1022,8 @@ const MIME_TYPES: Record<string, string> = {
 
       if (req.method === "DELETE") {
         try {
-          await unlink(goalPath);
+          await unlink(ocGoalPath).catch(() => {});
+          await unlink(ompGoalPath).catch(() => {});
         } catch {
           // ignore
         }
