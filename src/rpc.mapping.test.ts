@@ -22,7 +22,7 @@ describe("mapRpcModelsToOpenCodeProviders", () => {
     expect(res.providers[1].models).toHaveProperty("b");
   });
 
-  test("maps contextWindow/maxTokens onto limit and copies capabilities", () => {
+  test("maps contextWindow/maxTokens onto limit and transforms capabilities and modalities", () => {
     const models: OmpRpcModel[] = [
       {
         provider: "vllm",
@@ -46,7 +46,22 @@ describe("mapRpcModelsToOpenCodeProviders", () => {
       reasoning: true,
       tool_call: true,
       attachment: false,
-      capabilities: { input: ["text", "image"] },
+      capabilities: {
+        input: {
+          text: true,
+          image: true,
+          audio: false,
+          video: false,
+          pdf: false,
+        },
+        toolcall: true,
+        attachment: false,
+        reasoning: true,
+      },
+      modalities: {
+        input: ["text", "image"],
+        output: ["text"],
+      },
       variants: {
         none: {},
         low: {},
@@ -54,6 +69,31 @@ describe("mapRpcModelsToOpenCodeProviders", () => {
         high: {},
         xhigh: {},
       },
+    });
+  });
+
+  test("infers attachment and modalities for vision-capable models", () => {
+    const models: OmpRpcModel[] = [
+      {
+        provider: "llama.cpp",
+        id: "qwen3.8-27b",
+        name: "Qwen3.8-27B",
+        input: ["text", "image"],
+      },
+    ];
+    const res = mapRpcModelsToOpenCodeProviders(models);
+    const m = res.providers[0].models["qwen3.8-27b"];
+    expect(m.attachment).toBe(true);
+    expect(m.modalities).toEqual({
+      input: ["text", "image"],
+      output: ["text"],
+    });
+    expect(m.capabilities?.input).toEqual({
+      text: true,
+      image: true,
+      audio: false,
+      video: false,
+      pdf: false,
     });
   });
 
