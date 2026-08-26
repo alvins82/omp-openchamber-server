@@ -355,7 +355,7 @@ expect(p1.text).toBe("(empty)");
     expect(goalSnapshotTokens).toBe(21920);
   });
 
-  it("preserves discrete assistant messages and individual token metrics on multi-step turns", async () => {
+  it("collates multi-step assistant turns into a single assistant message with ordered parts", async () => {
     const multiStepSid = "sess-multistep-test-uuid";
     const path = fileFor("multistep-session.jsonl", [
       userMsg("u1", "Run autonomous audit", 1755927600000),
@@ -410,39 +410,31 @@ expect(p1.text).toBe("(empty)");
     ]);
 
     const out = await loadMessagesFromFile(path, multiStepSid, TEST_DB);
-    expect(out).toHaveLength(3);
+    expect(out).toHaveLength(2);
 
     // User message
     expect(out![0].info.role).toBe("user");
 
-    // Assistant Step 0
+    // Unified Assistant Turn
     expect(out![1].info.role).toBe("assistant");
-    expect(out![1].info.finish).toBe("tool-calls");
+    expect(out![1].info.finish).toBe("stop");
     expect(out![1].info.tokens).toEqual({
-      input: 1000,
-      output: 50,
-      reasoning: 30,
-      cache: { read: 500, write: 0 },
-    });
-    expect(out![1].parts).toHaveLength(2);
-    expect(out![1].parts[0].type).toBe("reasoning");
-    expect(out![1].parts[1].type).toBe("tool");
-    expect((out![1].parts[1] as any).state.status).toBe("completed");
-    expect((out![1].parts[1] as any).state.output).toBe("file1.txt\nfile2.txt");
-
-    // Assistant Step 1
-    expect(out![2].info.role).toBe("assistant");
-    expect(out![2].info.finish).toBe("stop");
-    expect(out![2].info.tokens).toEqual({
       input: 1200,
       output: 80,
       reasoning: 40,
       cache: { read: 1000, write: 0 },
     });
-    expect(out![2].parts).toHaveLength(2);
-    expect(out![2].parts[0].type).toBe("reasoning");
-    expect(out![2].parts[1].type).toBe("text");
-    expect((out![2].parts[1] as any).text).toBe("Audit complete. 2 files found.");
+    expect(out![1].parts).toHaveLength(4);
+    expect(out![1].parts[0].type).toBe("reasoning");
+    expect((out![1].parts[0] as any).text).toBe("Step 1: Check files");
+    expect(out![1].parts[1].type).toBe("tool");
+    expect((out![1].parts[1] as any).tool).toBe("bash");
+    expect((out![1].parts[1] as any).state.status).toBe("completed");
+    expect((out![1].parts[1] as any).state.output).toBe("file1.txt\nfile2.txt");
+    expect(out![1].parts[2].type).toBe("reasoning");
+    expect((out![1].parts[2] as any).text).toBe("Step 2: Summarize");
+    expect(out![1].parts[3].type).toBe("text");
+    expect((out![1].parts[3] as any).text).toBe("Audit complete. 2 files found.");
   });
 });
 
