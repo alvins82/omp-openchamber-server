@@ -13,6 +13,7 @@ import {
   deleteOmpSession,
   updateOmpSession,
 } from "./sessions";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
 
 const UUID_A = "123e4567-e89b-12d3-a456-426614174000";
 const UUID_B = "00000000-1111-2222-3333-444455556666";
@@ -261,6 +262,9 @@ describe("create, update, and delete OMP sessions", () => {
   });
 
   it("preserves and updates session metadata", async () => {
+    const events: OpenCodeEvent[] = [];
+    const unsub = subscribeOpenCodeEvents((e) => events.push(e));
+
     const created = await createOmpSession(DIR_A, { title: "Goal Test Session" });
     const goalMetadata = {
       openchamber: {
@@ -279,6 +283,12 @@ describe("create, update, and delete OMP sessions", () => {
     const fetched = await getOmpSessionByOpenCodeId(created.id, DIR_A);
     expect(fetched?.metadata).toEqual(goalMetadata);
 
+    const updateEvents = events.filter((e) => e.type === "session.updated");
+    expect(updateEvents.length).toBeGreaterThan(0);
+    const lastUpdate = updateEvents[updateEvents.length - 1];
+    expect(lastUpdate.directory).toBe(DIR_A);
+
+    unsub();
     await deleteOmpSession(created.id, DIR_A);
   });
 

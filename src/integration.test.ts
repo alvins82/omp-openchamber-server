@@ -461,8 +461,41 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(getGoal.status).toBe(200);
     expect((await getGoal.json()).content).toBe("Ship comprehensive tests");
 
+    // Both OpenChamber .md and OMP .txt files should exist
+    const ocGoalFile = Bun.file(join(FAKE_HOME, ".config", "openchamber", "goals", `${SES_A}.md`));
+    const ompGoalFile = Bun.file(join(FAKE_HOME, ".omp", "goals", `${SES_A}.txt`));
+    expect(await ocGoalFile.exists()).toBe(true);
+    expect(await ocGoalFile.text()).toBe("Ship comprehensive tests");
+    expect(await ompGoalFile.exists()).toBe(true);
+    expect(await ompGoalFile.text()).toBe("Ship comprehensive tests");
+
+    // GET without /api prefix should also work
+    const getNoApi = await fetch(BASE + "goals/objective/" + SES_A);
+    expect(getNoApi.status).toBe(200);
+    expect((await getNoApi.json()).content).toBe("Ship comprehensive tests");
+
+    // DELETE should clean up both files
     const delGoal = await fetch(BASE + "api/goals/objective/" + SES_A, { method: "DELETE" });
     expect(delGoal.status).toBe(200);
+    expect(await Bun.file(join(FAKE_HOME, ".config", "openchamber", "goals", `${SES_A}.md`)).exists()).toBe(false);
+    expect(await Bun.file(join(FAKE_HOME, ".omp", "goals", `${SES_A}.txt`)).exists()).toBe(false);
+
+    // GET after DELETE returns 404
+    const getAfterDel = await fetch(BASE + "api/goals/objective/" + SES_A);
+    expect(getAfterDel.status).toBe(404);
+  });
+
+  test("GET /api/goals/objective/:id falls back to .omp/goals/*.txt when .md is absent", async () => {
+    const fallbackId = "ses_legacy_fallback_123";
+    const legacyPath = join(FAKE_HOME, ".omp", "goals", `${fallbackId}.txt`);
+    await Bun.write(legacyPath, "Legacy objective content");
+
+    const getGoal = await fetch(BASE + "api/goals/objective/" + fallbackId);
+    expect(getGoal.status).toBe(200);
+    expect((await getGoal.json()).content).toBe("Legacy objective content");
+
+    await fetch(BASE + "api/goals/objective/" + fallbackId, { method: "DELETE" });
+    expect(await Bun.file(legacyPath).exists()).toBe(false);
   });
 
   test("Filesystem endpoints (/api/fs/*) support mkdir, stat, write, rename, and delete", async () => {
