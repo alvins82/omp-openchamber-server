@@ -255,6 +255,23 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     expect(clientAuthResp.status).toBe(200);
     const clientAuthJson = await clientAuthResp.json() as { token?: string };
     expect(typeof clientAuthJson.token).toBe("string");
+
+    // fs/serve (required for OpenChamber HTML/asset preview)
+    const testHtmlFile = join(testDir, "test-preview.html");
+    writeFileSync(testHtmlFile, "<!DOCTYPE html><html><body><h1>Hello OpenChamber</h1></body></html>");
+    try {
+      const serveResp = await fetch(`${BASE}api/fs/serve${testHtmlFile}?oc_url_token=omp-local-url-token`);
+      expect(serveResp.status).toBe(200);
+      expect(serveResp.headers.get("content-type")).toContain("text/html");
+      expect(serveResp.headers.get("x-content-type-options")).toBe("nosniff");
+      const serveContent = await serveResp.text();
+      expect(serveContent).toContain("Hello OpenChamber");
+
+      const notFoundResp = await fetch(`${BASE}api/fs/serve/non-existent-path-12345.html`);
+      expect(notFoundResp.status).toBe(404);
+    } finally {
+      rmSync(testHtmlFile, { force: true });
+    }
   });
 });
 

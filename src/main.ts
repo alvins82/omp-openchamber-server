@@ -461,6 +461,37 @@ const server = Bun.serve({
         }
       }
 
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".xml": "application/xml; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".pdf": "application/pdf",
+  ".csv": "text/csv; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".eot": "application/vnd.ms-fontobject",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".ts": "text/plain; charset=utf-8",
+};
+
       // Filesystem raw
       if ((path === "/fs/raw" || path === "/api/fs/raw") && req.method === "GET") {
         const rawPath = url.searchParams.get("path")?.trim() || "";
@@ -474,26 +505,7 @@ const server = Bun.serve({
             return jsonError("Specified path is not a file", 400);
           }
           const ext = extname(resolved).toLowerCase();
-          const mimeTypes: Record<string, string> = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".svg": "image/svg+xml",
-            ".webp": "image/webp",
-            ".ico": "image/x-icon",
-            ".bmp": "image/bmp",
-            ".avif": "image/avif",
-            ".pdf": "application/pdf",
-            ".json": "application/json",
-            ".txt": "text/plain",
-            ".md": "text/markdown",
-            ".html": "text/html",
-            ".css": "text/css",
-            ".js": "application/javascript",
-            ".ts": "text/plain",
-          };
-          const mimeType = mimeTypes[ext] || "application/octet-stream";
+          const mimeType = MIME_TYPES[ext] || "application/octet-stream";
           const headers: Record<string, string> = {
             ...cors,
             "Content-Type": mimeType,
@@ -524,6 +536,40 @@ const server = Bun.serve({
             return jsonError("File not found", 404);
           }
           return jsonError(err instanceof Error ? err.message : "raw read failed", 500);
+        }
+      }
+
+      // Filesystem serve (used by OpenChamber HTML preview / iframe)
+      if ((path.startsWith("/api/fs/serve/") || path.startsWith("/fs/serve/")) && req.method === "GET") {
+        const prefix = path.startsWith("/api/fs/serve/") ? "/api/fs/serve/" : "/fs/serve/";
+        const rawSubpath = path.slice(prefix.length);
+        if (!rawSubpath) return jsonError("Path is required", 400);
+        const decodedPath = decodeURIComponent(rawSubpath);
+        const candidatePath = decodedPath.startsWith("/") ? decodedPath : `/${decodedPath}`;
+        const resolved = existsSync(candidatePath) ? candidatePath : resolveFsPath(decodedPath, effectiveDir);
+        try {
+          const s = await stat(resolved);
+          if (!s.isFile()) {
+            return jsonError("Specified path is not a file", 400);
+          }
+          const ext = extname(resolved).toLowerCase();
+          const mimeType = MIME_TYPES[ext] || "application/octet-stream";
+          const headers: Record<string, string> = {
+            ...cors,
+            "Content-Type": mimeType,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          };
+          const file = Bun.file(resolved);
+          return new Response(file, {
+            status: 200,
+            headers,
+          });
+        } catch (err: any) {
+          if (err && (err.code === "ENOENT" || String(err).includes("ENOENT"))) {
+            return jsonError("File not found", 404);
+          }
+          return jsonError(err instanceof Error ? err.message : "serve failed", 500);
         }
       }
 
