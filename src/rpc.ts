@@ -100,7 +100,20 @@ export interface OpenCodeModel {
   reasoning?: unknown;
   tool_call?: boolean;
   attachment?: boolean;
-  capabilities?: { input?: unknown };
+  capabilities?: {
+    input?: unknown;
+    output?: unknown;
+    toolcall?: boolean;
+    reasoning?: boolean;
+    attachment?: boolean;
+    temperature?: boolean;
+    [key: string]: unknown;
+  };
+  modalities?: {
+    input?: string[];
+    output?: string[];
+  };
+  variants?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -437,6 +450,63 @@ const defaultThinkingVariants: Record<string, unknown> = {
   xhigh: {},
 };
 
+export function parseModelInputCapabilities(input: unknown): {
+  capabilitiesInput: unknown;
+  modalitiesInput?: string[];
+} {
+  if (input === undefined) {
+    return {
+      capabilitiesInput: undefined,
+      modalitiesInput: undefined,
+    };
+  }
+
+  if (Array.isArray(input)) {
+    const modalities = input
+      .filter((x): x is string => typeof x === "string")
+      .map((s) => s.toLowerCase());
+    const hasText = modalities.includes("text") || modalities.length === 0;
+    const hasImage = modalities.includes("image");
+    const hasAudio = modalities.includes("audio");
+    const hasVideo = modalities.includes("video");
+    const hasPdf = modalities.includes("pdf");
+
+    return {
+      capabilitiesInput: {
+        text: hasText,
+        image: hasImage,
+        audio: hasAudio,
+        video: hasVideo,
+        pdf: hasPdf,
+      },
+      modalitiesInput: modalities.length > 0 ? modalities : ["text"],
+    };
+  }
+
+  if (typeof input === "object" && input !== null) {
+    const obj = input as Record<string, unknown>;
+    const modalities = Object.entries(obj)
+      .filter(([_, v]) => Boolean(v))
+      .map(([k]) => k.toLowerCase());
+    return {
+      capabilitiesInput: {
+        text: Boolean(obj.text),
+        image: Boolean(obj.image),
+        audio: Boolean(obj.audio),
+        video: Boolean(obj.video),
+        pdf: Boolean(obj.pdf),
+        ...obj,
+      },
+      modalitiesInput: modalities.length > 0 ? modalities : ["text"],
+    };
+  }
+
+  return {
+    capabilitiesInput: input,
+    modalitiesInput: undefined,
+  };
+}
+
 export function mapRpcModelsToOpenCodeProviders(
   modelsInput: OmpRpcModel[] | { models?: OmpRpcModel[] } | unknown,
   currentProviderID?: string,
@@ -474,6 +544,11 @@ export function mapRpcModelsToOpenCodeProviders(
         variants[String(effort)] = {};
       }
     }
+    const { capabilitiesInput, modalitiesInput } = parseModelInputCapabilities(model.input);
+    const supportsAttachment =
+      model.supportsAttachment ??
+      (modalitiesInput ? modalitiesInput.includes("image") || modalitiesInput.includes("pdf") : undefined);
+
     const entry: OpenCodeModel = {
       id: model.id,
       name: model.name,
@@ -481,8 +556,17 @@ export function mapRpcModelsToOpenCodeProviders(
       limit: undefined,
       reasoning: model.reasoning ?? true,
       tool_call: model.supportsToolCall,
-      attachment: model.supportsAttachment,
-      capabilities: model.input !== undefined ? { input: model.input } : undefined,
+      attachment: supportsAttachment,
+      capabilities:
+        capabilitiesInput !== undefined
+          ? {
+              input: capabilitiesInput,
+              ...(typeof model.supportsToolCall === "boolean" ? { toolcall: model.supportsToolCall } : {}),
+              ...(typeof supportsAttachment === "boolean" ? { attachment: supportsAttachment } : {}),
+              ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
+            }
+          : undefined,
+      modalities: modalitiesInput ? { input: modalitiesInput, output: ["text"] } : undefined,
       variants,
     };
     if (model.contextWindow !== undefined || model.maxTokens !== undefined) {
