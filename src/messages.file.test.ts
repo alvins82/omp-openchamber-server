@@ -355,7 +355,7 @@ expect(p1.text).toBe("(empty)");
     expect(goalSnapshotTokens).toBe(21920);
   });
 
-  it("preserves discrete assistant messages and individual token metrics on multi-step turns", async () => {
+  it("collates multi-step assistant turns into a single assistant message with ordered parts", async () => {
     const multiStepSid = "sess-multistep-test-uuid";
     const path = fileFor("multistep-session.jsonl", [
       userMsg("u1", "Run autonomous audit", 1755927600000),
@@ -410,39 +410,273 @@ expect(p1.text).toBe("(empty)");
     ]);
 
     const out = await loadMessagesFromFile(path, multiStepSid, TEST_DB);
-    expect(out).toHaveLength(3);
+    expect(out).toHaveLength(2);
 
     // User message
     expect(out![0].info.role).toBe("user");
 
-    // Assistant Step 0
+    // Unified Assistant Turn
     expect(out![1].info.role).toBe("assistant");
-    expect(out![1].info.finish).toBe("tool-calls");
+    expect(out![1].info.finish).toBe("stop");
     expect(out![1].info.tokens).toEqual({
-      input: 1000,
-      output: 50,
-      reasoning: 30,
-      cache: { read: 500, write: 0 },
-    });
-    expect(out![1].parts).toHaveLength(2);
-    expect(out![1].parts[0].type).toBe("reasoning");
-    expect(out![1].parts[1].type).toBe("tool");
-    expect((out![1].parts[1] as any).state.status).toBe("completed");
-    expect((out![1].parts[1] as any).state.output).toBe("file1.txt\nfile2.txt");
-
-    // Assistant Step 1
-    expect(out![2].info.role).toBe("assistant");
-    expect(out![2].info.finish).toBe("stop");
-    expect(out![2].info.tokens).toEqual({
       input: 1200,
       output: 80,
       reasoning: 40,
       cache: { read: 1000, write: 0 },
     });
-    expect(out![2].parts).toHaveLength(2);
-    expect(out![2].parts[0].type).toBe("reasoning");
-    expect(out![2].parts[1].type).toBe("text");
-    expect((out![2].parts[1] as any).text).toBe("Audit complete. 2 files found.");
+    expect(out![1].parts).toHaveLength(4);
+    expect(out![1].parts[0].type).toBe("reasoning");
+    expect((out![1].parts[0] as any).text).toBe("Step 1: Check files");
+    expect(out![1].parts[1].type).toBe("tool");
+    expect((out![1].parts[1] as any).tool).toBe("bash");
+    expect((out![1].parts[1] as any).state.status).toBe("completed");
+    expect((out![1].parts[1] as any).state.output).toBe("file1.txt\nfile2.txt");
+    expect(out![1].parts[2].type).toBe("reasoning");
+    expect((out![1].parts[2] as any).text).toBe("Step 2: Summarize");
+    expect(out![1].parts[3].type).toBe("text");
+    expect((out![1].parts[3] as any).text).toBe("Audit complete. 2 files found.");
+  });
+
+  it("handles multi-turn conversations where each turn contains multiple assistant steps and tool calls", async () => {
+    const multiTurnSid = "sess-multiturn-collation-uuid";
+    const path = fileFor("multiturn-collation.jsonl", [
+      // Turn 1: User prompt 1
+      userMsg("u1", "Step 1 goal", 1755927600000),
+      {
+        type: "message",
+        id: "a1_1",
+        timestamp: "2026-08-23T00:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Checking directory" },
+            { type: "toolCall", id: "call_read_1", name: "read", arguments: { path: "package.json" } },
+          ],
+          stopReason: "toolUse",
+          usage: { input: 500, output: 20 },
+          timestamp: 1755927601000,
+        },
+      },
+      {
+        type: "message",
+        id: "tr1_1",
+        timestamp: "2026-08-23T00:00:02.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_read_1",
+          toolName: "read",
+          content: '{"name": "app"}',
+          timestamp: 1755927602000,
+        },
+      },
+      {
+        type: "message",
+        id: "a1_2",
+        timestamp: "2026-08-23T00:00:03.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Found package.json for app." },
+          ],
+          stopReason: "stop",
+          usage: { input: 600, output: 30 },
+          cost: 0.005,
+          timestamp: 1755927603000,
+        },
+      },
+      // Turn 2: User prompt 2
+      userMsg("u2", "Step 2 goal", 1755927610000),
+      {
+        type: "message",
+        id: "a2_1",
+        timestamp: "2026-08-23T00:00:11.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "call_write_1", name: "write", arguments: { path: "src/index.ts", content: "console.log(1);" } },
+          ],
+          stopReason: "toolUse",
+          usage: { input: 800, output: 40 },
+          timestamp: 1755927611000,
+        },
+      },
+      {
+        type: "message",
+        id: "tr2_1",
+        timestamp: "2026-08-23T00:00:12.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_write_1",
+          toolName: "write",
+          content: "Successfully wrote 19 bytes to src/index.ts",
+          timestamp: 1755927612000,
+        },
+      },
+      {
+        type: "message",
+        id: "a2_2",
+        timestamp: "2026-08-23T00:00:13.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Created index.ts." },
+          ],
+          stopReason: "stop",
+          usage: { input: 950, output: 25 },
+          cost: 0.008,
+          timestamp: 1755927613000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, multiTurnSid, TEST_DB);
+    expect(out).toHaveLength(4);
+
+    // Turn 1
+    expect(out![0].info.role).toBe("user");
+    expect(out![0].info.id).toBe("msg_" + multiTurnSid + "_u1");
+
+    expect(out![1].info.role).toBe("assistant");
+    expect(out![1].info.parentID).toBe(out![0].info.id);
+    expect(out![1].info.finish).toBe("stop");
+    expect(out![1].info.tokens?.input).toBe(600);
+    expect(out![1].info.tokens?.output).toBe(30);
+    expect(out![1].info.cost).toBe(0.005);
+    expect(out![1].parts).toHaveLength(3);
+    expect(out![1].parts[0].type).toBe("reasoning");
+    expect(out![1].parts[1].type).toBe("tool");
+    expect((out![1].parts[1] as any).state.status).toBe("completed");
+    expect(out![1].parts[2].type).toBe("text");
+
+    // Turn 2
+    expect(out![2].info.role).toBe("user");
+    expect(out![2].info.id).toBe("msg_" + multiTurnSid + "_u2");
+
+    expect(out![3].info.role).toBe("assistant");
+    expect(out![3].info.parentID).toBe(out![2].info.id);
+    expect(out![3].info.finish).toBe("stop");
+    expect(out![3].info.tokens?.input).toBe(950);
+    expect(out![3].info.tokens?.output).toBe(25);
+    expect(out![3].info.cost).toBe(0.008);
+    expect(out![3].parts).toHaveLength(2);
+    expect(out![3].parts[0].type).toBe("tool");
+    expect((out![3].parts[0] as any).state.status).toBe("completed");
+    expect(out![3].parts[1].type).toBe("text");
+  });
+
+  it("collates goal-mode continuations and hidden custom messages under the user turn", async () => {
+    const goalSid = "sess-goal-mode-continuation-uuid";
+    const path = fileFor("goal-mode-continuation.jsonl", [
+      userMsg("u1", "Build entire application in goal mode", 1755927600000),
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "2026-08-23T00:00:02.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Round 1: scaffold project" },
+            { type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm init -y" } },
+          ],
+          stopReason: "toolUse",
+          usage: { input: 1000, output: 50 },
+          timestamp: 1755927602000,
+        },
+      },
+      {
+        type: "message",
+        id: "tr1",
+        timestamp: "2026-08-23T00:00:03.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          toolName: "bash",
+          content: "Wrote to package.json",
+          timestamp: 1755927603000,
+        },
+      },
+      // Hidden goal continuation message from OMP goal runner
+      {
+        type: "message",
+        id: "gc1",
+        timestamp: "2026-08-23T00:00:04.000Z",
+        message: {
+          role: "custom",
+          customType: "goal-continuation",
+          display: false,
+          content: "Objective: Build entire application. Continue towards the objective.",
+          timestamp: 1755927604000,
+        },
+      },
+      {
+        type: "message",
+        id: "a2",
+        timestamp: "2026-08-23T00:00:06.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Round 2: write source code" },
+            { type: "toolCall", id: "c2", name: "write", arguments: { path: "main.js", content: "..." } },
+          ],
+          stopReason: "toolUse",
+          usage: { input: 1500, output: 80 },
+          timestamp: 1755927606000,
+        },
+      },
+      {
+        type: "message",
+        id: "tr2",
+        timestamp: "2026-08-23T00:00:07.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "c2",
+          toolName: "write",
+          content: "Wrote 20 bytes",
+          timestamp: 1755927607000,
+        },
+      },
+      // Goal completed final turn
+      {
+        type: "message",
+        id: "a3",
+        timestamp: "2026-08-23T00:00:09.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Goal complete: application built and verified." },
+          ],
+          stopReason: "stop",
+          usage: { input: 2000, output: 40 },
+          cost: 0.015,
+          timestamp: 1755927609000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, goalSid, TEST_DB);
+    expect(out).toHaveLength(2);
+
+    expect(out![0].info.role).toBe("user");
+    expect(out![0].parts[0]).toMatchObject({ type: "text", text: "Build entire application in goal mode" });
+
+    // Single unified assistant message containing all 3 rounds of the goal run
+    expect(out![1].info.role).toBe("assistant");
+    expect(out![1].info.finish).toBe("stop");
+    expect(out![1].info.tokens?.input).toBe(2000);
+    expect(out![1].info.tokens?.output).toBe(40);
+    expect(out![1].info.cost).toBe(0.015);
+
+    expect(out![1].parts).toHaveLength(5);
+    expect(out![1].parts[0].type).toBe("reasoning");
+    expect(out![1].parts[1].type).toBe("tool");
+    expect((out![1].parts[1] as any).tool).toBe("bash");
+    expect((out![1].parts[1] as any).state.status).toBe("completed");
+    expect(out![1].parts[2].type).toBe("reasoning");
+    expect(out![1].parts[3].type).toBe("tool");
+    expect((out![1].parts[3] as any).tool).toBe("write");
+    expect((out![1].parts[3] as any).state.status).toBe("completed");
+    expect(out![1].parts[4].type).toBe("text");
+    expect((out![1].parts[4] as any).text).toBe("Goal complete: application built and verified.");
   });
 });
 
