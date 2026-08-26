@@ -219,7 +219,8 @@ describe("promptSessionAsync with image attachments", () => {
       mimeType: "image/png",
     });
 
-    // Verify SSE emitted both text part and file part for the user message
+    // Verify SSE emitted both text part and file part for the user message,
+    // with file parts emitted first to prevent OpenChamber from duplicating optimistic file parts
     const partEvents = events.filter((e) => e.type === "message.part.updated");
     expect(partEvents.length).toBeGreaterThanOrEqual(2);
 
@@ -227,8 +228,11 @@ describe("promptSessionAsync with image attachments", () => {
       .map((e) => e.properties.part as { type: string; text?: string; url?: string; mime?: string })
       .filter((p) => p.type === "text" || p.type === "file");
 
-    expect(userParts.some((p) => p.type === "text" && p.text === "What is this a screenshot of?")).toBe(true);
-    expect(userParts.some((p) => p.type === "file" && p.mime === "image/png" && p.url === PNG_DATA_URL)).toBe(true);
+    const fileIndex = userParts.findIndex((p) => p.type === "file" && p.mime === "image/png" && p.url === PNG_DATA_URL);
+    const textIndex = userParts.findIndex((p) => p.type === "text" && p.text === "What is this a screenshot of?");
+    expect(fileIndex).toBeGreaterThanOrEqual(0);
+    expect(textIndex).toBeGreaterThanOrEqual(0);
+    expect(fileIndex).toBeLessThan(textIndex);
   });
 
   test("supports image-only prompt without text parts", async () => {
@@ -317,5 +321,52 @@ describe("loadMessagesFromFile with image blocks", () => {
     expect(filePart.type).toBe("file");
     expect(filePart.mime).toBe("image/png");
     expect(filePart.url).toBe(`data:image/png;base64,${PNG_1X1_BASE64}`);
+  });
+
+  test("resolves blob:sha256 externalized image reference from disk to valid data URL", async () => {
+    // Write a mock blob file to ~/.omp/agent/blobs or tmpDir
+    const rawBuffer = Buffer.from(PNG_1X1_BASE64, "base64");
+    const hash = new Bun.SHA256().update(rawBuffer).digest("hex");
+    const blobsDir = join(tmpDir, "blobs");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(blobsDir, { recursive: true });
+    writeFileSync(join(blobsDir, hash), rawBuffer);
+
+    process.env.PI_CODING_AGENT_DIR = tmpDir;
+
+    const jsonlPath = join(tmpDir, "blob_session.jsonl");
+    const lines = [
+      { type: "session", id: sid, title: "Blob Test Session" },
+      {
+        type: "message",
+        id: "msg_1",
+        timestamp: "2026-08-26T06:07:34.606Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "Check this externalized blob" },
+            { type: "image", data: `blob:sha256:${hash}`, mimeType: "image/webp" },
+          ],
+          timestamp: 1787724454494,
+        },
+      },
+    ];
+    writeFileSync(jsonlPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    try {
+      const records = await loadMessagesFromFile(jsonlPath, sid, testDb);
+      expect(records).not.toBeNull();
+      expect(records).toHaveLength(1);
+
+      const userRecord = records![0];
+      expect(userRecord.parts).toHaveLength(2);
+
+      const filePart = userRecord.parts[1] as OpenCodeFilePart;
+      expect(filePart.type).toBe("file");
+      expect(filePart.mime).toBe("image/webp");
+      expect(filePart.url).toBe(`data:image/webp;base64,${PNG_1X1_BASE64}`);
+    } finally {
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
   });
 });

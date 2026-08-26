@@ -23,6 +23,7 @@ import {
   type QuestionRequest,
 } from "./approvals";
 import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
+import { isBlobRef, readBlobBufferSync } from "./blobs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
@@ -184,6 +185,17 @@ async function resolveImageFromUrl(
     };
   }
 
+  if (isBlobRef(url)) {
+    const buffer = readBlobBufferSync(url);
+    if (buffer) {
+      return {
+        type: "image",
+        data: buffer.toString("base64"),
+        mimeType: explicitMime || "image/png",
+      };
+    }
+  }
+
   let filePath = url;
   if (filePath.startsWith("file://")) {
     try {
@@ -225,12 +237,23 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
         (typeof p.mimeType === "string" ? p.mimeType : undefined) ||
         (typeof p.mime === "string" ? p.mime : undefined);
       if (typeof p.data === "string" && p.data.length > 0) {
-        const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
-        images.push({
-          type: "image",
-          data: rawData,
-          mimeType: mimeType || "image/png",
-        });
+        if (isBlobRef(p.data)) {
+          const buffer = readBlobBufferSync(p.data);
+          if (buffer) {
+            images.push({
+              type: "image",
+              data: buffer.toString("base64"),
+              mimeType: mimeType || "image/png",
+            });
+          }
+        } else {
+          const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+          images.push({
+            type: "image",
+            data: rawData,
+            mimeType: mimeType || "image/png",
+          });
+        }
       } else if (typeof p.url === "string" && p.url.length > 0) {
         const img = await resolveImageFromUrl(p.url, mimeType, cwd);
         if (img) images.push(img);
@@ -246,16 +269,28 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
       const isImage =
         (inferredMime && inferredMime.startsWith("image/")) ||
         url.startsWith("data:image/") ||
+        isBlobRef(url) ||
         (inferredMime !== undefined && inferredMime in IMAGE_EXT_TO_MIME);
 
       if (isImage) {
         if (typeof p.data === "string" && p.data.length > 0) {
-          const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
-          images.push({
-            type: "image",
-            data: rawData,
-            mimeType: inferredMime || "image/png",
-          });
+          if (isBlobRef(p.data)) {
+            const buffer = readBlobBufferSync(p.data);
+            if (buffer) {
+              images.push({
+                type: "image",
+                data: buffer.toString("base64"),
+                mimeType: inferredMime || "image/png",
+              });
+            }
+          } else {
+            const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+            images.push({
+              type: "image",
+              data: rawData,
+              mimeType: inferredMime || "image/png",
+            });
+          }
         } else if (url) {
           const img = await resolveImageFromUrl(url, inferredMime, cwd);
           if (img) images.push(img);
@@ -1156,21 +1191,16 @@ export async function promptSessionAsync(
         cwd,
       );
 
-      let partIndex = 0;
+      let textPartIndex: number | undefined;
+      let nextPartIndex = 0;
       if (promptText) {
-        emitMessagePartUpdated(
-          openCodeId,
-          {
-            id: `part_${openCodeId}_${parentMessageID}_${partIndex++}`,
-            type: "text",
-            text: promptText,
-            messageID: parentMessageID,
-            sessionID: openCodeId,
-          },
-          cwd,
-        );
+        textPartIndex = nextPartIndex++;
       }
 
+      // Emit file/image parts before text parts so OpenChamber's event-reducer
+      // replaces optimistic file parts in place (it gates optimistic part replacement
+      // on the first part lacking sessionID). Emitting text first assigns sessionID
+      // to part 0, causing subsequent file parts to be appended as duplicates.
       if (Array.isArray(body.parts)) {
         for (const part of body.parts) {
           if (part && typeof part === "object" && "type" in part && (part.type === "file" || part.type === "image")) {
@@ -1184,7 +1214,7 @@ export async function promptSessionAsync(
             emitMessagePartUpdated(
               openCodeId,
               {
-                id: (typeof p.id === "string" ? p.id : undefined) || `part_${openCodeId}_${parentMessageID}_${partIndex++}`,
+                id: (typeof p.id === "string" ? p.id : undefined) || `part_${openCodeId}_${parentMessageID}_${nextPartIndex++}`,
                 type: "file",
                 mime,
                 url,
@@ -1196,6 +1226,20 @@ export async function promptSessionAsync(
             );
           }
         }
+      }
+
+      if (promptText && textPartIndex !== undefined) {
+        emitMessagePartUpdated(
+          openCodeId,
+          {
+            id: `part_${openCodeId}_${parentMessageID}_${textPartIndex}`,
+            type: "text",
+            text: promptText,
+            messageID: parentMessageID,
+            sessionID: openCodeId,
+          },
+          cwd,
+        );
       }
     }
 

@@ -8,6 +8,7 @@ import {
   recordPersistedMessageId,
 } from "./title-db";
 import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
+import { resolveImageDataUrl, isBlobRef } from "./blobs";
 
 export interface OpenCodeMessageRecord {
   info: {
@@ -402,13 +403,21 @@ function buildParts(
         (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
         (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
         "image/png";
-      const data =
+      const rawData =
         (typeof block.data === "string" ? block.data : undefined) ||
         (typeof raw.data === "string" ? (raw.data as string) : "");
-      const url =
+      const rawUrl =
         (typeof block.url === "string" ? block.url : undefined) ||
         (typeof raw.url === "string" ? (raw.url as string) : undefined) ||
-        (data ? `data:${mime};base64,${data}` : "");
+        "";
+
+      let url = "";
+      if (rawData) {
+        url = resolveImageDataUrl(rawData, mime);
+      } else if (rawUrl) {
+        url = resolveImageDataUrl(rawUrl, mime);
+      }
+
       parts.push({
         id: `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
         type: "file",
@@ -425,12 +434,23 @@ function buildParts(
         (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
         (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
         "application/octet-stream";
-      const url =
+      const rawUrl =
         (typeof block.url === "string" ? block.url : undefined) ||
         (typeof raw.url === "string" ? (raw.url as string) : "");
+      const rawData =
+        (typeof block.data === "string" ? block.data : undefined) ||
+        (typeof raw.data === "string" ? (raw.data as string) : "");
       const filename =
         (typeof block.filename === "string" ? block.filename : undefined) ||
         (typeof raw.filename === "string" ? (raw.filename as string) : undefined);
+
+      let url = rawUrl;
+      if (rawData) {
+        url = resolveImageDataUrl(rawData, mime);
+      } else if (rawUrl) {
+        url = resolveImageDataUrl(rawUrl, mime);
+      }
+
       parts.push({
         id:
           (typeof block.id === "string" ? block.id : undefined) ||
