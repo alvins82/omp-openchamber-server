@@ -1,7 +1,7 @@
 import { OmpRpcConnection, getCurrentModel, type OmpRpcEvent, type OmpRpcTransport } from "./rpc";
 import { invalidateMessageCache, recordUserMessageId, mapOmpUsageToTokens, type TokenBreakdown } from "./messages";
 import { promptLogger } from "./logger";
-import { getOmpSessionByOpenCodeId, setOmpSessionTitle, toOpenCodeSessionId } from "./sessions";
+import { getOmpSessionByOpenCodeId, setOmpSessionTitle, toOpenCodeSessionId, readSessionHeader } from "./sessions";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
 import {
   emitMessagePartDelta,
@@ -540,6 +540,7 @@ export function createEventHandler(
   onComplete: () => void,
   conn?: OmpRpcTransport,
   cwd?: string,
+  sessionPath?: string,
 ) {
   let assistantMessageID: string | undefined;
   let assistantStartTime: number | undefined;
@@ -631,14 +632,72 @@ export function createEventHandler(
       (typeof event.assistantMessageEvent === "object" && event.assistantMessageEvent !== null ? (event.assistantMessageEvent as Record<string, unknown>).usage : undefined) ??
       (typeof event.payload === "object" && event.payload !== null ? (event.payload as Record<string, unknown>).usage : undefined);
 
+    let usageUpdated = false;
     if (rawUsage) {
       const mapped = mapOmpUsageToTokens(rawUsage, event.cost);
       if (mapped.tokens.input > 0 || mapped.tokens.output > 0 || mapped.tokens.cache.read > 0 || mapped.tokens.cache.write > 0) {
         latestTokens = mapped.tokens;
+        usageUpdated = true;
       }
       if (mapped.cost > 0) {
         latestCost = (latestCost || 0) + mapped.cost;
+        usageUpdated = true;
       }
+    }
+
+    const rawMsg = (event.message || event.data || event.assistantMessageEvent) as Record<string, unknown> | undefined;
+    if (rawMsg && typeof rawMsg.provider === "string" && typeof rawMsg.model === "string") {
+      if (model.providerID !== rawMsg.provider || model.modelID !== rawMsg.model) {
+        model.providerID = rawMsg.provider;
+        model.modelID = rawMsg.model;
+        if (typeof rawMsg.variant === "string") model.variant = rawMsg.variant;
+        usageUpdated = true;
+      }
+    }
+
+    if (type === "tool_execution_end" || type === "turn_end" || type === "message_end") {
+      if (sessionPath) {
+        (async () => {
+          try {
+            const header = await readSessionHeader(sessionPath);
+            if (header?.tokens && (header.tokens.input > 0 || header.tokens.output > 0)) {
+              latestTokens = header.tokens;
+              if (header.cost !== undefined) latestCost = header.cost;
+              if (header.model && (!model.providerID || model.providerID === "omp")) {
+                model.providerID = header.model.providerID;
+                model.modelID = header.model.modelID;
+              }
+              if (assistantMessageID) {
+                emitAssistantInfo(
+                  openCodeId,
+                  assistantMessageID,
+                  parentMessageID,
+                  model,
+                  undefined,
+                  cwd,
+                  assistantStartTime,
+                  latestTokens,
+                  latestCost,
+                );
+              }
+            }
+          } catch { /* best effort */ }
+        })();
+      }
+    }
+
+    if (usageUpdated && assistantMessageID) {
+      emitAssistantInfo(
+        openCodeId,
+        assistantMessageID,
+        parentMessageID,
+        model,
+        undefined,
+        cwd,
+        assistantStartTime,
+        latestTokens,
+        latestCost,
+      );
     }
 
     if (
@@ -999,7 +1058,7 @@ export async function promptSessionAsync(
 
         state.unsubscribe();
         state.unsubscribe = state.conn.onEvent(
-          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, state.conn, cwd),
+          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, state.conn, cwd, state.sessionPath),
         );
 
         await state.conn.request("prompt", { message: promptText });
