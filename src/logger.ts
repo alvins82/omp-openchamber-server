@@ -16,6 +16,17 @@ export const logger = pino({
         },
       }
     : undefined,
+  hooks: {
+    logMethod(inputArgs, method, level) {
+      if (!process.env.LOG_LEVEL) {
+        if (level === 20 || level >= 50) {
+          return method.apply(this, inputArgs);
+        }
+        return;
+      }
+      return method.apply(this, inputArgs);
+    },
+  },
 });
 
 export const httpLogger = logger.child({ module: "http" });
