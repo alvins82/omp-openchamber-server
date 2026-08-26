@@ -274,6 +274,34 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(got).toHaveLength(0);
   });
 
+  it("agent_end with provider error emits error text part, message finish error, and session.error event", () => {
+    const errorEvent = {
+      type: "agent_end",
+      stopReason: "error",
+      errorMessage: "400 At most 1 image(s) may be provided in one prompt.",
+      errorStatus: 400,
+      provider: "vllm",
+      model: "qwen3.8-27b",
+    } as unknown as OmpRpcEvent;
+    expect(runTurn([errorEvent])).toBe(1);
+    expect(got.length).toBeGreaterThanOrEqual(3);
+
+    const messagePartEvt = got.find((e) => e.type === "message.part.updated");
+    expect(messagePartEvt).toBeDefined();
+    const partProps = messagePartEvt!.properties.part as Record<string, unknown>;
+    expect(partProps.type).toBe("text");
+    expect(partProps.text).toContain("400 At most 1 image(s) may be provided in one prompt.");
+
+    const finalMessageUpdatedEvt = got.filter((e) => e.type === "message.updated").at(-1);
+    expect(finalMessageUpdatedEvt).toBeDefined();
+    const infoProps = finalMessageUpdatedEvt!.properties.info as Record<string, unknown>;
+    expect(infoProps.finish).toBe("error");
+    expect((infoProps.error as { message: string })?.message).toBe("400 At most 1 image(s) may be provided in one prompt.");
+
+    const sessionErrorEvt = got.find((e) => e.type === "session.error");
+    expect(sessionErrorEvt).toBeDefined();
+  });
+
   it("prompt_result with agentInvoked false also completes silently", () => {
     const ev = { type: "prompt_result", agentInvoked: false } as unknown as OmpRpcEvent;
     expect(runTurn([ev])).toBe(1);

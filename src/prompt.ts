@@ -337,11 +337,12 @@ function emitAssistantInfo(
   messageID: string,
   parentID: string | undefined,
   model: ModelRef,
-  finish?: "stop",
+  finish?: "stop" | "error" | string,
   cwd?: string,
   createdTime?: number,
   tokens?: TokenBreakdown,
   cost?: number,
+  error?: unknown,
 ): void {
   const dir = cwd || process.cwd();
   const created = createdTime ?? Date.now();
@@ -366,6 +367,7 @@ function emitAssistantInfo(
       modelID: model.modelID,
       variant: model.variant,
       finish,
+      error,
       time: { created, completed: finish ? Date.now() : undefined },
     },
   }, dir);
@@ -870,26 +872,97 @@ export function createEventHandler(
       );
     }
 
+    const handleTurnEnd = () => {
+      const isError = event.stopReason === "error" || Boolean(event.errorMessage) || (typeof event.error === "string" && event.error.length > 0);
+      const rawError = typeof event.errorMessage === "string" ? event.errorMessage : (typeof event.error === "string" ? event.error : undefined);
+
+      if (isError) {
+        promptLogger.error(
+          {
+            sessionID: openCodeId,
+            provider: (event.provider as string) || model.providerID,
+            model: (event.model as string) || model.modelID,
+            stopReason: event.stopReason,
+            errorStatus: event.errorStatus,
+            errorId: event.errorId,
+            errorMessage: rawError,
+          },
+          "[prompt] agent turn ended with provider error",
+        );
+
+        if (!hasStarted) {
+          ensureStarted();
+        }
+
+        if (assistantMessageID && partIndex === 0 && !activePartText && toolParts.size === 0) {
+          const errText = rawError ? `⚠️ **Provider Error**: ${rawError}` : "⚠️ **Provider Error**: Turn ended with error.";
+          emitAssistantPart(
+            openCodeId,
+            assistantMessageID,
+            makePartId(openCodeId, assistantMessageID, 0),
+            "text",
+            errText,
+            cwd,
+            assistantStartTime,
+            Date.now(),
+          );
+        }
+
+        if (assistantMessageID) {
+          emitAssistantInfo(
+            openCodeId,
+            assistantMessageID,
+            parentMessageID,
+            model,
+            "error",
+            cwd,
+            assistantStartTime,
+            latestTokens,
+            latestCost,
+            rawError ? { message: rawError } : { message: "Turn ended with error" },
+          );
+        }
+
+        emitSessionError(openCodeId, { message: rawError || "Turn ended with error" }, cwd);
+      } else {
+        if (assistantMessageID) {
+          emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
+        }
+      }
+    };
+
     if (
       (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
       (type === "prompt_result" && event.agentInvoked === false)
     ) {
       if (nonTerminalTimer) clearTimeout(nonTerminalTimer);
       finalizeCurrentPart();
-      if (assistantMessageID) {
-        emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
-      }
+      handleTurnEnd();
       onComplete();
       return;
     }
 
     if (type === "agent_end" && event.isTerminal === false) {
       if (nonTerminalTimer) clearTimeout(nonTerminalTimer);
+      const isError = event.stopReason === "error" || Boolean(event.errorMessage) || (typeof event.error === "string" && event.error.length > 0);
+      const rawError = typeof event.errorMessage === "string" ? event.errorMessage : (typeof event.error === "string" ? event.error : undefined);
+      if (isError) {
+        promptLogger.error(
+          {
+            sessionID: openCodeId,
+            provider: (event.provider as string) || model.providerID,
+            model: (event.model as string) || model.modelID,
+            stopReason: event.stopReason,
+            errorStatus: event.errorStatus,
+            errorId: event.errorId,
+            errorMessage: rawError,
+          },
+          "[prompt] non-terminal agent turn ended with provider error",
+        );
+      }
       nonTerminalTimer = setTimeout(() => {
         finalizeCurrentPart();
-        if (assistantMessageID) {
-          emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
-        }
+        handleTurnEnd();
         onComplete();
       }, 1500);
       return;
