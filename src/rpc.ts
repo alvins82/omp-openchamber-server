@@ -20,13 +20,20 @@ export function embeddedOmpConfigOverlay(): string {
       if (existsSync(p)) extensionPaths.push(p);
     }
   }
-  const extensionsConfig =
+  const extensionsYaml =
     extensionPaths.length > 0
       ? `\nextensions:\n${extensionPaths.map((p) => `  - ${JSON.stringify(p)}`).join("\n")}\n`
-      : "\n";
+      : "";
   writeFileSync(
     file,
-    `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true\nbrowser.enabled: false\nbrowser.relay: false${extensionsConfig}`,
+    `mcp:
+  enableProjectConfig: false
+edit:
+  autoRepair:
+    enabled: true
+browser:
+  enabled: false
+  relay: false${extensionsYaml}`,
   );
   return file;
 }

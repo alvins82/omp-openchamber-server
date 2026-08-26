@@ -125,6 +125,8 @@ describe("embeddedOmpConfigOverlay", () => {
     const b = embeddedOmpConfigOverlay();
     expect(a).toBe(b);
     expect(a.endsWith(join("oc-omp-embedded", "config.yml"))).toBe(true);
-    expect(readFileSync(a, "utf8")).toContain("mcp.enableProjectConfig: false");
+    const content = readFileSync(a, "utf8");
+    expect(content).toContain("enableProjectConfig: false");
+    expect(content).toContain("enabled: false");
   });
 });
