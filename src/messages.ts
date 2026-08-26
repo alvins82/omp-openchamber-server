@@ -61,6 +61,103 @@ export interface OpenCodeToolPart {
   sessionID: string;
 }
 
+export interface TokenBreakdown {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: {
+    read: number;
+    write: number;
+  };
+}
+
+export interface UsageMappingResult {
+  tokens: TokenBreakdown;
+  cost: number;
+}
+
+export function mapOmpUsageToTokens(rawUsage: unknown, rawCost?: unknown): UsageMappingResult {
+  const fallbackTokens: TokenBreakdown = {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cache: { read: 0, write: 0 },
+  };
+
+  if (!rawUsage || typeof rawUsage !== "object") {
+    let cost = 0;
+    if (typeof rawCost === "number" && Number.isFinite(rawCost)) {
+      cost = Math.max(0, rawCost);
+    }
+    return { tokens: fallbackTokens, cost };
+  }
+
+  const u = rawUsage as Record<string, unknown>;
+
+  const input = typeof u.input === "number" && Number.isFinite(u.input)
+    ? Math.max(0, u.input)
+    : (typeof u.prompt_tokens === "number" && Number.isFinite(u.prompt_tokens)
+      ? Math.max(0, u.prompt_tokens)
+      : (typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens) ? Math.max(0, u.inputTokens) : 0));
+
+  const output = typeof u.output === "number" && Number.isFinite(u.output)
+    ? Math.max(0, u.output)
+    : (typeof u.completion_tokens === "number" && Number.isFinite(u.completion_tokens)
+      ? Math.max(0, u.completion_tokens)
+      : (typeof u.outputTokens === "number" && Number.isFinite(u.outputTokens) ? Math.max(0, u.outputTokens) : 0));
+
+  const reasoning = typeof u.reasoning === "number" && Number.isFinite(u.reasoning)
+    ? Math.max(0, u.reasoning)
+    : (typeof u.reasoning_tokens === "number" && Number.isFinite(u.reasoning_tokens)
+      ? Math.max(0, u.reasoning_tokens)
+      : (typeof u.reasoningTokens === "number" && Number.isFinite(u.reasoningTokens) ? Math.max(0, u.reasoningTokens) : 0));
+
+  const cacheRead = typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)
+    ? Math.max(0, u.cacheRead)
+    : (typeof u.cache_read === "number" && Number.isFinite(u.cache_read)
+      ? Math.max(0, u.cache_read)
+      : (typeof u.cache_read_input_tokens === "number" && Number.isFinite(u.cache_read_input_tokens)
+        ? Math.max(0, u.cache_read_input_tokens)
+        : (typeof u.prompt_cache_hit_tokens === "number" && Number.isFinite(u.prompt_cache_hit_tokens)
+          ? Math.max(0, u.prompt_cache_hit_tokens)
+          : 0)));
+
+  const cacheWrite = typeof u.cacheWrite === "number" && Number.isFinite(u.cacheWrite)
+    ? Math.max(0, u.cacheWrite)
+    : (typeof u.cache_write === "number" && Number.isFinite(u.cache_write)
+      ? Math.max(0, u.cache_write)
+      : (typeof u.cache_creation_input_tokens === "number" && Number.isFinite(u.cache_creation_input_tokens)
+        ? Math.max(0, u.cache_creation_input_tokens)
+        : (typeof u.prompt_cache_miss_tokens === "number" && Number.isFinite(u.prompt_cache_miss_tokens)
+          ? Math.max(0, u.prompt_cache_miss_tokens)
+          : 0)));
+
+  let cost = 0;
+  if (typeof rawCost === "number" && Number.isFinite(rawCost)) {
+    cost = Math.max(0, rawCost);
+  } else if (typeof u.cost === "number" && Number.isFinite(u.cost)) {
+    cost = Math.max(0, u.cost);
+  } else if (u.cost && typeof u.cost === "object") {
+    const c = u.cost as Record<string, unknown>;
+    if (typeof c.total === "number" && Number.isFinite(c.total)) {
+      cost = Math.max(0, c.total);
+    }
+  }
+
+  return {
+    tokens: {
+      input,
+      output,
+      reasoning,
+      cache: {
+        read: cacheRead,
+        write: cacheWrite,
+      },
+    },
+    cost,
+  };
+}
+
 export type AgentMessageRole = "user" | "developer" | "assistant" | "custom" | "toolResult";
 
 export interface AgentMessageContentBlock {
@@ -87,6 +184,8 @@ export interface AgentMessage {
   toolName?: string;
   isError?: boolean;
   details?: unknown;
+  usage?: unknown;
+  cost?: unknown;
 }
 
 const TTL_MS = 5_000;
@@ -473,6 +572,15 @@ export function mapRpcMessagesToOpenCodeRecords(
         if (msg.stopReason && msg.stopReason !== "toolUse") {
           lastAssistantRecord.info.finish = msg.stopReason;
         }
+        if (msg.usage || msg.cost) {
+          const { tokens, cost } = mapOmpUsageToTokens(msg.usage, msg.cost);
+          if (tokens.input > 0 || tokens.output > 0 || tokens.cache.read > 0 || tokens.cache.write > 0) {
+            lastAssistantRecord.info.tokens = tokens;
+          }
+          if (cost > 0) {
+            lastAssistantRecord.info.cost = (lastAssistantRecord.info.cost ?? 0) + cost;
+          }
+        }
         continue;
       }
 
@@ -501,14 +609,15 @@ export function mapRpcMessagesToOpenCodeRecords(
       const providerID = msg.provider ?? "omp";
       const modelID = msg.model ?? "omp";
       const variant = msg.variant ?? "default";
+      const { tokens, cost } = mapOmpUsageToTokens(msg.usage, msg.cost);
       const record: OpenCodeMessageRecord = {
         info: {
           ...baseInfo,
           parentID: lastUserMessageId,
           finish: "stop",
           mode: "primary",
-          cost: 0,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost,
+          tokens,
           model: { id: modelID, providerID, modelID, variant },
           providerID,
           modelID,

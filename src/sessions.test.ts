@@ -302,6 +302,48 @@ describe("create, update, and delete OMP sessions", () => {
 
     await deleteOmpSession(created.id, DIR_A);
   });
+
+  it("extracts latest assistant tokens and cost into session record", async () => {
+    const sessionFile = join(SROOT, "-Users-alvin-proj", "tokens-session.jsonl");
+    const content = [
+      JSON.stringify({ type: "title", v: 1, title: "Tokens Session", updatedAt: "2026-08-25T00:00:00.000Z", pad: " ".repeat(180) }),
+      JSON.stringify({ type: "session", id: "66666666-4444-3333-2222-11110000aaaa", cwd: DIR_A, timestamp: "2026-08-25T00:00:00.000Z", version: 3 }),
+      JSON.stringify({ type: "message", message: { role: "user", content: "hello" } }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "world" }],
+          usage: {
+            input: 12000,
+            output: 350,
+            cacheRead: 1500,
+            cacheWrite: 0,
+            reasoning: 0,
+            cost: { total: 0.05 },
+          },
+        },
+      }),
+    ].join("\n") + "\n";
+
+    writeFileSync(sessionFile, content);
+    try {
+      const session = await getOmpSessionByOpenCodeId("ses_6666666644443333222211110000aaaa", DIR_A);
+      expect(session).not.toBeNull();
+      expect(session?.tokens).toEqual({
+        input: 12000,
+        output: 350,
+        reasoning: 0,
+        cache: {
+          read: 1500,
+          write: 0,
+        },
+      });
+      expect(session?.cost).toBe(0.05);
+    } finally {
+      rmSync(sessionFile, { force: true });
+    }
+  });
 });
 
 
