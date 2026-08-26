@@ -33,7 +33,9 @@ edit:
     enabled: true
 browser:
   enabled: false
-  relay: false${extensionsYaml}`,
+  relay: false
+compaction:
+  methodOrder: [remote, handoff, shake, soft]${extensionsYaml}`,
   );
   return file;
 }
