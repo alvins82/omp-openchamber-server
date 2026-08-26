@@ -1,5 +1,6 @@
 import {
   listOmpSessions,
+  listOmpChildSessions,
   getOmpSessionByOpenCodeId,
   createOmpSession,
   deleteOmpSession,
@@ -946,6 +947,17 @@ const server = Bun.serve({
         return json(todos);
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "todo failed", 500);
+      }
+    }
+
+    // Session children (subagents)
+    const childrenMatch = p.match(/^\/session\/([^/]+)\/children$/);
+    if (childrenMatch && req.method === "GET") {
+      try {
+        const children = await listOmpChildSessions(childrenMatch[1], dir);
+        return json(children);
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "children failed", 500);
       }
     }
 

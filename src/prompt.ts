@@ -1,12 +1,14 @@
 import { OmpRpcConnection, getCurrentModel, type OmpRpcEvent, type OmpRpcTransport } from "./rpc";
 import { invalidateMessageCache, recordUserMessageId } from "./messages";
 import { promptLogger } from "./logger";
-import { getOmpSessionByOpenCodeId, setOmpSessionTitle } from "./sessions";
+import { getOmpSessionByOpenCodeId, setOmpSessionTitle, toOpenCodeSessionId } from "./sessions";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
 import {
   emitMessagePartDelta,
   emitMessagePartUpdated,
   emitMessageUpdated,
+  emitSessionCreated,
+  emitSessionUpdated,
   emitSessionIdle,
   emitSessionStatus,
   emitSessionError,
@@ -602,6 +604,8 @@ export function createEventHandler(
     }, cwd);
   };
 
+  let nonTerminalTimer: ReturnType<typeof setTimeout> | undefined;
+
   return (event: OmpRpcEvent) => {
     const type = event.type;
     if (typeof type !== "string") return;
@@ -610,12 +614,30 @@ export function createEventHandler(
       (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
       (type === "prompt_result" && event.agentInvoked === false)
     ) {
+      if (nonTerminalTimer) clearTimeout(nonTerminalTimer);
       finalizeCurrentPart();
       if (assistantMessageID) {
         emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
       }
       onComplete();
       return;
+    }
+
+    if (type === "agent_end" && event.isTerminal === false) {
+      if (nonTerminalTimer) clearTimeout(nonTerminalTimer);
+      nonTerminalTimer = setTimeout(() => {
+        finalizeCurrentPart();
+        if (assistantMessageID) {
+          emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
+        }
+        onComplete();
+      }, 1500);
+      return;
+    }
+
+    if (nonTerminalTimer) {
+      clearTimeout(nonTerminalTimer);
+      nonTerminalTimer = undefined;
     }
 
     if (type === "extension_ui_request") {
@@ -695,6 +717,66 @@ export function createEventHandler(
         emitToolPart(toolCallId, resolvedTool, state);
         return;
       }
+    }
+
+    if (type === "subagent_lifecycle") {
+      const payload = (event.payload || {}) as Record<string, unknown>;
+      const subagentId = String(payload.id ?? "");
+      if (subagentId) {
+        const childOpenCodeId = toOpenCodeSessionId(subagentId);
+        const status = String(payload.status ?? "");
+        const agentName = String(payload.agent ?? "task");
+        const description = typeof payload.description === "string" && payload.description.trim().length > 0
+          ? payload.description.trim()
+          : `Subagent (${agentName})`;
+
+        if (status === "started") {
+          setSubagentStatus(childOpenCodeId, { type: "busy" });
+          emitSessionCreated({
+            id: childOpenCodeId,
+            slug: childOpenCodeId,
+            projectID: "global",
+            directory: cwd,
+            path: typeof payload.sessionFile === "string" ? payload.sessionFile : "",
+            title: description,
+            parentID: openCodeId,
+            agent: agentName,
+            model: { id: "omp", providerID: "omp", modelID: "omp", variant: "default" },
+            version: "0.0.0",
+            time: { created: Date.now(), updated: Date.now() },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          }, cwd);
+          emitSessionStatus(childOpenCodeId, { type: "busy" }, cwd);
+        } else {
+          setSubagentStatus(childOpenCodeId, undefined);
+          emitSessionStatus(childOpenCodeId, { type: "idle" }, cwd);
+          emitSessionUpdated({
+            id: childOpenCodeId,
+            parentID: openCodeId,
+            time: { updated: Date.now() },
+          }, cwd);
+        }
+      }
+      return;
+    }
+
+    if (type === "subagent_progress") {
+      const payload = (event.payload || {}) as Record<string, unknown>;
+      const progress = (payload.progress || {}) as Record<string, unknown>;
+      const subagentId = String(progress.id ?? payload.id ?? "");
+      if (subagentId) {
+        const childOpenCodeId = toOpenCodeSessionId(subagentId);
+        const status = String(progress.status ?? "");
+        if (status === "running" || status === "busy") {
+          setSubagentStatus(childOpenCodeId, { type: "busy" });
+          emitSessionStatus(childOpenCodeId, { type: "busy" }, cwd);
+        } else if (status === "completed" || status === "error" || status === "aborted") {
+          setSubagentStatus(childOpenCodeId, undefined);
+          emitSessionStatus(childOpenCodeId, { type: "idle" }, cwd);
+        }
+      }
+      return;
     }
 
     if (type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
@@ -955,10 +1037,23 @@ export function isSessionBusy(openCodeId: string, cwd: string): boolean {
   return sessionStates.get(sessionKey(openCodeId, cwd))?.busy ?? false;
 }
 
+const subagentStatusMap = new Map<string, { type: string }>();
+
+export function setSubagentStatus(childOpenCodeId: string, status?: { type: string }): void {
+  if (!status) {
+    subagentStatusMap.delete(childOpenCodeId);
+  } else {
+    subagentStatusMap.set(childOpenCodeId, status);
+  }
+}
+
 export function getSessionStatusMap(): Record<string, { type: string }> {
   const result: Record<string, { type: string }> = {};
   for (const state of sessionStates.values()) {
     if (state.busy) result[state.openCodeId] = { type: "busy" };
+  }
+  for (const [id, status] of subagentStatusMap) {
+    result[id] = status;
   }
   return result;
 }
