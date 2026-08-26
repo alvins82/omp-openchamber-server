@@ -32,8 +32,20 @@ export interface OpenCodeMessageRecord {
     finish?: string;
     time: { created: number; completed?: number };
   };
-  parts: Array<OpenCodeTextPart | OpenCodeToolPart>;
+  parts: Array<OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart>;
 }
+
+export interface OpenCodeFilePart {
+  id: string;
+  type: "file";
+  mime?: string;
+  filename?: string;
+  url: string;
+  messageID: string;
+  sessionID: string;
+}
+
+export type OpenCodePart = OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart;
 
 export interface OpenCodeTextPart {
   id: string;
@@ -337,8 +349,8 @@ function buildParts(
   openCodeId: string,
   messageId: string,
   startIndex = 0,
-): Array<OpenCodeTextPart | OpenCodeToolPart> {
-  const parts: Array<OpenCodeTextPart | OpenCodeToolPart> = [];
+): OpenCodePart[] {
+  const parts: OpenCodePart[] = [];
   let currentTextPart: { type: "text" | "reasoning"; text: string } | null = null;
 
   const flushText = () => {
@@ -359,6 +371,7 @@ function buildParts(
   for (const block of normalizedContentBlocks(msg)) {
     if (!block || typeof block !== "object") continue;
     const kind = block.type;
+    const raw = block as Record<string, unknown>;
     if (kind === "text") {
       const text = typeof block.text === "string" ? block.text : JSON.stringify(block);
       if (currentTextPart && currentTextPart.type === "text") {
@@ -381,6 +394,54 @@ function buildParts(
       flushText();
       const startTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
       parts.push(createToolPart(block, openCodeId, messageId, startIndex + parts.length, startTime));
+    } else if (kind === "image") {
+      flushText();
+      const mime =
+        (typeof block.mimeType === "string" ? block.mimeType : undefined) ||
+        (typeof block.mime === "string" ? block.mime : undefined) ||
+        (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
+        (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
+        "image/png";
+      const data =
+        (typeof block.data === "string" ? block.data : undefined) ||
+        (typeof raw.data === "string" ? (raw.data as string) : "");
+      const url =
+        (typeof block.url === "string" ? block.url : undefined) ||
+        (typeof raw.url === "string" ? (raw.url as string) : undefined) ||
+        (data ? `data:${mime};base64,${data}` : "");
+      parts.push({
+        id: `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
+        type: "file",
+        mime,
+        url,
+        messageID: messageId,
+        sessionID: openCodeId,
+      });
+    } else if (kind === "file") {
+      flushText();
+      const mime =
+        (typeof block.mime === "string" ? block.mime : undefined) ||
+        (typeof block.mimeType === "string" ? block.mimeType : undefined) ||
+        (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
+        (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
+        "application/octet-stream";
+      const url =
+        (typeof block.url === "string" ? block.url : undefined) ||
+        (typeof raw.url === "string" ? (raw.url as string) : "");
+      const filename =
+        (typeof block.filename === "string" ? block.filename : undefined) ||
+        (typeof raw.filename === "string" ? (raw.filename as string) : undefined);
+      parts.push({
+        id:
+          (typeof block.id === "string" ? block.id : undefined) ||
+          `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
+        type: "file",
+        mime,
+        url,
+        ...(filename ? { filename } : {}),
+        messageID: messageId,
+        sessionID: openCodeId,
+      });
     } else {
       const text = JSON.stringify(block);
       if (currentTextPart && currentTextPart.type === "text") {

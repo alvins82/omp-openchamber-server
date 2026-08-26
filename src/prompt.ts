@@ -24,6 +24,8 @@ import {
 } from "./approvals";
 import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 
 interface OpenCodeTextPart {
   type: "text";
@@ -133,6 +135,136 @@ function isTextPart(value: unknown): value is OpenCodeTextPart {
     return typeof value.text === "string";
   }
   return true;
+}
+
+export interface ImageContent {
+  type: "image";
+  data: string; // base64 encoded image data
+  mimeType: string;
+}
+
+const IMAGE_EXT_TO_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+};
+
+export function mimeFromPath(pathOrUrl: string): string | undefined {
+  const clean = pathOrUrl.split("?")[0].split("#")[0];
+  const dot = clean.lastIndexOf(".");
+  if (dot !== -1) {
+    const ext = clean.slice(dot).toLowerCase();
+    return IMAGE_EXT_TO_MIME[ext];
+  }
+  return undefined;
+}
+
+async function resolveImageFromUrl(
+  url: string,
+  explicitMime?: string,
+  cwd?: string,
+): Promise<ImageContent | undefined> {
+  if (url.startsWith("data:")) {
+    const commaIndex = url.indexOf(",");
+    if (commaIndex === -1) return undefined;
+    const meta = url.slice(5, commaIndex);
+    const data = url.slice(commaIndex + 1);
+    const mimeMatch = meta.match(/^([^;,]+)/);
+    const mimeType = explicitMime || (mimeMatch ? mimeMatch[1] : undefined) || "image/png";
+    return {
+      type: "image",
+      data,
+      mimeType,
+    };
+  }
+
+  let filePath = url;
+  if (filePath.startsWith("file://")) {
+    try {
+      filePath = new URL(filePath).pathname;
+    } catch {
+      filePath = filePath.slice(7);
+    }
+  }
+
+  if (cwd && !isAbsolute(filePath)) {
+    filePath = resolve(cwd, filePath);
+  }
+
+  try {
+    const buffer = await readFile(filePath);
+    const mimeType = explicitMime || mimeFromPath(filePath) || "image/png";
+    return {
+      type: "image",
+      data: buffer.toString("base64"),
+      mimeType,
+    };
+  } catch (err) {
+    promptLogger.warn({ err, url, filePath }, `[prompt] failed to read image from ${filePath}`);
+    return undefined;
+  }
+}
+
+export async function extractPromptImages(body: PromptBody, cwd?: string): Promise<ImageContent[]> {
+  if (!Array.isArray(body.parts)) return [];
+  const images: ImageContent[] = [];
+
+  for (const part of body.parts) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const type = p.type;
+
+    if (type === "image") {
+      const mimeType =
+        (typeof p.mimeType === "string" ? p.mimeType : undefined) ||
+        (typeof p.mime === "string" ? p.mime : undefined);
+      if (typeof p.data === "string" && p.data.length > 0) {
+        const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+        images.push({
+          type: "image",
+          data: rawData,
+          mimeType: mimeType || "image/png",
+        });
+      } else if (typeof p.url === "string" && p.url.length > 0) {
+        const img = await resolveImageFromUrl(p.url, mimeType, cwd);
+        if (img) images.push(img);
+      }
+    } else if (type === "file") {
+      const mime =
+        (typeof p.mime === "string" ? p.mime : undefined) ||
+        (typeof p.mimeType === "string" ? p.mimeType : undefined);
+      const url = typeof p.url === "string" ? p.url : "";
+      const filename = typeof p.filename === "string" ? p.filename : "";
+      const inferredMime = mime || mimeFromPath(filename) || mimeFromPath(url);
+
+      const isImage =
+        (inferredMime && inferredMime.startsWith("image/")) ||
+        url.startsWith("data:image/") ||
+        (inferredMime !== undefined && inferredMime in IMAGE_EXT_TO_MIME);
+
+      if (isImage) {
+        if (typeof p.data === "string" && p.data.length > 0) {
+          const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+          images.push({
+            type: "image",
+            data: rawData,
+            mimeType: inferredMime || "image/png",
+          });
+        } else if (url) {
+          const img = await resolveImageFromUrl(url, inferredMime, cwd);
+          if (img) images.push(img);
+        }
+      }
+    }
+  }
+
+  return images;
 }
 
 function extractPromptText(body: PromptBody): string {
@@ -970,7 +1102,8 @@ export async function promptSessionAsync(
   }
 
   const promptText = extractPromptText(body);
-  if (!promptText) {
+  const images = await extractPromptImages(body, cwd);
+  if (!promptText && images.length === 0) {
     return { queued: false, error: "no text parts", status: 400 };
   }
 
@@ -1022,17 +1155,48 @@ export async function promptSessionAsync(
         },
         cwd,
       );
-      emitMessagePartUpdated(
-        openCodeId,
-        {
-          id: `part_${openCodeId}_${parentMessageID}_0`,
-          type: "text",
-          text: promptText,
-          messageID: parentMessageID,
-          sessionID: openCodeId,
-        },
-        cwd,
-      );
+
+      let partIndex = 0;
+      if (promptText) {
+        emitMessagePartUpdated(
+          openCodeId,
+          {
+            id: `part_${openCodeId}_${parentMessageID}_${partIndex++}`,
+            type: "text",
+            text: promptText,
+            messageID: parentMessageID,
+            sessionID: openCodeId,
+          },
+          cwd,
+        );
+      }
+
+      if (Array.isArray(body.parts)) {
+        for (const part of body.parts) {
+          if (part && typeof part === "object" && "type" in part && (part.type === "file" || part.type === "image")) {
+            const p = part as Record<string, unknown>;
+            const mime = (typeof p.mime === "string" ? p.mime : undefined) ||
+                         (typeof p.mimeType === "string" ? p.mimeType : undefined) ||
+                         "image/png";
+            const url = typeof p.url === "string"
+              ? p.url
+              : (typeof p.data === "string" ? `data:${mime};base64,${p.data}` : "");
+            emitMessagePartUpdated(
+              openCodeId,
+              {
+                id: (typeof p.id === "string" ? p.id : undefined) || `part_${openCodeId}_${parentMessageID}_${partIndex++}`,
+                type: "file",
+                mime,
+                url,
+                ...(p.filename ? { filename: p.filename } : {}),
+                messageID: parentMessageID,
+                sessionID: openCodeId,
+              },
+              cwd,
+            );
+          }
+        }
+      }
     }
 
     (async () => {
@@ -1062,10 +1226,17 @@ export async function promptSessionAsync(
           createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, state.conn, cwd, state.sessionPath),
         );
 
-        await state.conn.request("prompt", { message: promptText });
+        const promptPayload: { message: string; images?: ImageContent[] } = {
+          message: promptText,
+        };
+        if (images.length > 0) {
+          promptPayload.images = images;
+        }
+
+        await state.conn.request("prompt", promptPayload);
         await completion;
 
-        if (!isLowSignalTitleInput(promptText)) {
+        if (promptText && !isLowSignalTitleInput(promptText)) {
           (async () => {
             try {
               const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
