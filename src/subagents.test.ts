@@ -205,30 +205,35 @@ describe("Subagents & Child Sessions Integration", () => {
       `${JSON.stringify(u1)}\n${JSON.stringify(asst1)}\n${JSON.stringify(toolRes1)}\n${JSON.stringify(asst2)}\n`,
     );
 
-    // 3. Load messages and verify coalescence and matching ID
+    // 3. Load messages and verify discrete assistant steps and matching IDs
     const messages = await loadSessionMessages(parent.id, TEST_DIR);
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(3);
 
     expect(messages[0].info.id).toBe(userMessageId);
     expect(messages[0].info.role).toBe("user");
 
-    const asstRecord = messages[1];
-    expect(asstRecord.info.id).toBe(`msg_${parent.id}_asst_${userMessageId}`);
-    expect(asstRecord.info.role).toBe("assistant");
-    expect(asstRecord.info.parentID).toBe(userMessageId);
-    expect(asstRecord.info.finish).toBe("stop");
+    const asstStep0 = messages[1];
+    expect(asstStep0.info.id).toBe(`msg_${parent.id}_asst_${userMessageId}`);
+    expect(asstStep0.info.role).toBe("assistant");
+    expect(asstStep0.info.parentID).toBe(userMessageId);
+    expect(asstStep0.info.finish).toBe("tool-calls");
+    expect(asstStep0.parts).toHaveLength(2);
+    expect(asstStep0.parts[0].type).toBe("reasoning");
+    expect((asstStep0.parts[0] as any).text).toBe("I will spawn the SiteAudit subagent.");
+    expect(asstStep0.parts[1].type).toBe("tool");
+    expect((asstStep0.parts[1] as any).tool).toBe("task");
+    expect((asstStep0.parts[1] as any).state.status).toBe("completed");
+    expect((asstStep0.parts[1] as any).state.output).toBe("Spawned agent SiteAudit. completed: subagent yielded successfully.");
 
-    // All parts across both assistant turns are unified in order
-    expect(asstRecord.parts).toHaveLength(4);
-    expect(asstRecord.parts[0].type).toBe("reasoning");
-    expect((asstRecord.parts[0] as any).text).toBe("I will spawn the SiteAudit subagent.");
-    expect(asstRecord.parts[1].type).toBe("tool");
-    expect((asstRecord.parts[1] as any).tool).toBe("task");
-    expect((asstRecord.parts[1] as any).state.status).toBe("completed");
-    expect((asstRecord.parts[1] as any).state.output).toBe("Spawned agent SiteAudit. completed: subagent yielded successfully.");
-    expect(asstRecord.parts[2].type).toBe("reasoning");
-    expect((asstRecord.parts[2] as any).text).toBe("Subagent finished, writing summary.");
-    expect(asstRecord.parts[3].type).toBe("text");
-    expect((asstRecord.parts[3] as any).text).toBe("Subagent test passed.");
+    const asstStep1 = messages[2];
+    expect(asstStep1.info.id).toBe(`msg_${parent.id}_asst_${userMessageId}_step_1`);
+    expect(asstStep1.info.role).toBe("assistant");
+    expect(asstStep1.info.parentID).toBe(userMessageId);
+    expect(asstStep1.info.finish).toBe("stop");
+    expect(asstStep1.parts).toHaveLength(2);
+    expect(asstStep1.parts[0].type).toBe("reasoning");
+    expect((asstStep1.parts[0] as any).text).toBe("Subagent finished, writing summary.");
+    expect(asstStep1.parts[1].type).toBe("text");
+    expect((asstStep1.parts[1] as any).text).toBe("Subagent test passed.");
   });
 });
