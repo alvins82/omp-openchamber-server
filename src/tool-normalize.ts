@@ -101,6 +101,20 @@ export function normalizeToolInput(
     return normalized;
   }
 
+  if (tool === "hub" || tool === "job") {
+    if (normalized.ids && Array.isArray(normalized.ids)) {
+      if (normalized.ids.length === 1) {
+        normalized.subagent = normalized.ids[0];
+        delete normalized.ids;
+      }
+    }
+    if (normalized.op === "wait" || normalized.op === "poll") {
+      delete normalized.op;
+    }
+    delete normalized.timeoutMs;
+    delete normalized.timeout;
+  }
+
   // General tools: promote intent/i/l to description if needed, then strip raw intent keys
   if (normalized.i || normalized.intent || normalized.l) {
     if (!normalized.description && (normalized.intent || normalized.i || normalized.l)) {
@@ -136,9 +150,30 @@ export function stripTaskResultEnvelope(text: string): string {
 }
 
 /**
+ * Cleans boilerplate markdown and follow-up hints from hub/job delivery text.
+ */
+export function cleanHubOutput(text: string): string {
+  let cleaned = stripTaskResultEnvelope(text);
+
+  // Strip follow-up boilerplate like "SmokeTest is now idle — message it via..."
+  cleaned = cleaned.replace(/\n\n[a-zA-Z0-9_-]+\s+(?:is now idle|was stopped|was aborted)[^\n]*/g, "");
+
+  // If a single completed task is wrapped in ## Completed (...) ### Name [task] — completed \nLabel: ... \n```\nBODY\n```
+  const singleJobMatch = /^## Completed \(\d+\)\s*\n+###\s+([^\n]+)\s+—\s+completed(?:\s*\n+Label:[^\n]*)?\s*\n+```[a-z]*\n([\s\S]*?)\n```\s*$/i.exec(cleaned.trim());
+  if (singleJobMatch) {
+    return singleJobMatch[2].trim();
+  }
+
+  // Strip top-level fences if wrapping single output
+  cleaned = cleaned.replace(/^```[a-z]*\n([\s\S]*?)\n```$/g, "$1").trim();
+
+  return cleaned;
+}
+
+/**
  * Normalizes tool execution output to conform to OpenCode output expectations.
  * - For glob/find: returns "" for empty results and converts file arrays / OMP grouped paths to newline-delimited lists.
- * - For tools containing <task-result>: unwraps inner output body.
+ * - For tools containing <task-result> or hub outputs: unwraps inner output body.
  */
 export function normalizeToolOutput(
   toolName: string | undefined,
@@ -167,6 +202,10 @@ export function normalizeToolOutput(
     if (parsedPaths !== null) {
       return parsedPaths.join("\n");
     }
+  }
+
+  if (tool === "hub" || tool === "job") {
+    return cleanHubOutput(output);
   }
 
   if (output.includes("<task-result")) {

@@ -584,7 +584,9 @@ export function createEventHandler(
 
   const emitToolPart = (toolCallId: string, tool: string|undefined, state: ToolPartState) => {
     ensureStarted();
-    finalizeCurrentPart();
+    if (!toolParts.has(toolCallId)) {
+      finalizeCurrentPart();
+    }
     const mid = assistantMessageID!;
     const entry = toolParts.get(toolCallId);
     const validTool = tool && tool !== "tool" ? tool : undefined;
@@ -836,7 +838,6 @@ export function createEventHandler(
       (eventType.startsWith("toolcall_") || eventType === "toolCall" || eventType === "tool_call")
     ) {
       ensureStarted();
-      finalizeCurrentPart();
       const toolCallId = getToolCallId(assistantMessageEvent) ?? `tool_${randomUUID().replace(/-/g, "")}`;
       const tool = getToolName(assistantMessageEvent);
       const existing = toolParts.get(toolCallId);
