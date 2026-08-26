@@ -354,5 +354,95 @@ expect(p1.text).toBe("(empty)");
     const goalSnapshotTokens = asstInfo.tokens!.input + asstInfo.tokens!.cache.read + asstInfo.tokens!.output;
     expect(goalSnapshotTokens).toBe(21920);
   });
+
+  it("preserves discrete assistant messages and individual token metrics on multi-step turns", async () => {
+    const multiStepSid = "sess-multistep-test-uuid";
+    const path = fileFor("multistep-session.jsonl", [
+      userMsg("u1", "Run autonomous audit", 1755927600000),
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "2026-08-23T00:00:05.000Z",
+        message: {
+          id: "a1",
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Step 1: Check files" },
+            { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+          ],
+          provider: "llama.cpp",
+          model: "Qwen3.8-27B",
+          usage: { input: 1000, output: 50, reasoning: 30, cacheRead: 500, cacheWrite: 0 },
+          stopReason: "toolUse",
+          timestamp: 1755927605000,
+        },
+      },
+      {
+        type: "message",
+        id: "tr1",
+        timestamp: "2026-08-23T00:00:06.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          toolName: "bash",
+          content: "file1.txt\nfile2.txt",
+          timestamp: 1755927606000,
+        },
+      },
+      {
+        type: "message",
+        id: "a2",
+        timestamp: "2026-08-23T00:00:10.000Z",
+        message: {
+          id: "a2",
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Step 2: Summarize" },
+            { type: "text", text: "Audit complete. 2 files found." },
+          ],
+          provider: "llama.cpp",
+          model: "Qwen3.8-27B",
+          usage: { input: 1200, output: 80, reasoning: 40, cacheRead: 1000, cacheWrite: 0 },
+          stopReason: "stop",
+          timestamp: 1755927610000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, multiStepSid, TEST_DB);
+    expect(out).toHaveLength(3);
+
+    // User message
+    expect(out![0].info.role).toBe("user");
+
+    // Assistant Step 0
+    expect(out![1].info.role).toBe("assistant");
+    expect(out![1].info.finish).toBe("tool-calls");
+    expect(out![1].info.tokens).toEqual({
+      input: 1000,
+      output: 50,
+      reasoning: 30,
+      cache: { read: 500, write: 0 },
+    });
+    expect(out![1].parts).toHaveLength(2);
+    expect(out![1].parts[0].type).toBe("reasoning");
+    expect(out![1].parts[1].type).toBe("tool");
+    expect((out![1].parts[1] as any).state.status).toBe("completed");
+    expect((out![1].parts[1] as any).state.output).toBe("file1.txt\nfile2.txt");
+
+    // Assistant Step 1
+    expect(out![2].info.role).toBe("assistant");
+    expect(out![2].info.finish).toBe("stop");
+    expect(out![2].info.tokens).toEqual({
+      input: 1200,
+      output: 80,
+      reasoning: 40,
+      cache: { read: 1000, write: 0 },
+    });
+    expect(out![2].parts).toHaveLength(2);
+    expect(out![2].parts[0].type).toBe("reasoning");
+    expect(out![2].parts[1].type).toBe("text");
+    expect((out![2].parts[1] as any).text).toBe("Audit complete. 2 files found.");
+  });
 });
 

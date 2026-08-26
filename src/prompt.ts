@@ -83,6 +83,7 @@ export type OmpConnectionFactory = (cwd: string, sessionPath: string) => Promise
 const defaultConnectionFactory: OmpConnectionFactory = async (cwd, sessionPath) => {
   const conn = await OmpRpcConnection.spawn(cwd);
   await conn.switchSession(sessionPath);
+  await conn.request("set_subagent_subscription", { level: "events" }).catch(() => {});
   return conn;
 };
 

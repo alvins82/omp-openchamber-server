@@ -118,8 +118,11 @@ function captureEvents() {
 
 const info = (e: { properties: Record<string, unknown> }) =>
   e.properties.info as {
+    role?: string;
     model?: { id?: string; providerID?: string; modelID?: string; variant?: string };
     finish?: string;
+    tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+    cost?: number;
     time?: { created: number; completed?: number };
   };
 const part = (e: { properties: Record<string, unknown> }) =>

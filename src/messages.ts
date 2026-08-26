@@ -490,6 +490,7 @@ export function mapRpcMessagesToOpenCodeRecords(
   const recordedList = getRecordedUserMessages(openCodeId, dbPath);
   const matchedRecordedIndices = new Set<number>();
   let userMessageIndex = 0;
+  let asstStepIndex = 0;
 
   const userMessages = messages.filter((m) => openCodeRoleFor(m) === "user");
 
@@ -509,6 +510,7 @@ export function mapRpcMessagesToOpenCodeRecords(
 
     let messageId: string;
     if (role === "user") {
+      asstStepIndex = 0;
       const msgText = extractUserMessageText(msg);
       let matchedIndex = -1;
 
@@ -564,73 +566,71 @@ export function mapRpcMessagesToOpenCodeRecords(
       }
 
       userMessageIndex++;
+      visibleIndex++;
+      const parts = buildParts(msg, openCodeId, messageId);
+      const baseInfo: OpenCodeMessageRecord["info"] = {
+        id: messageId,
+        role: "user",
+        sessionID: openCodeId,
+        agent: "omp",
+        model: { providerID: "omp", modelID: "omp", variant: "default" },
+        time: { created: createdAt, completed: createdAt },
+      };
+      records.push({ info: baseInfo, parts });
+      lastUserMessageId = messageId;
+      lastAssistantRecord = undefined;
     } else {
-      if (lastAssistantRecord && lastUserMessageId && lastAssistantRecord.info.parentID === lastUserMessageId) {
-        const newParts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
-        lastAssistantRecord.parts.push(...newParts);
-        lastAssistantRecord.info.time.completed = createdAt;
-        if (msg.stopReason && msg.stopReason !== "toolUse") {
-          lastAssistantRecord.info.finish = msg.stopReason;
-        }
-        if (msg.usage || msg.cost) {
-          const { tokens, cost } = mapOmpUsageToTokens(msg.usage, msg.cost);
-          if (tokens.input > 0 || tokens.output > 0 || tokens.cache.read > 0 || tokens.cache.write > 0) {
-            lastAssistantRecord.info.tokens = tokens;
-          }
-          if (cost > 0) {
-            lastAssistantRecord.info.cost = (lastAssistantRecord.info.cost ?? 0) + cost;
-          }
-        }
-        continue;
-      }
-
       if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
         messageId = msg.id;
       } else if (lastUserMatched && lastUserMessageId) {
-        messageId = `msg_${openCodeId}_asst_${lastUserMessageId}`;
+        messageId = asstStepIndex === 0
+          ? `msg_${openCodeId}_asst_${lastUserMessageId}`
+          : `msg_${openCodeId}_asst_${lastUserMessageId}_step_${asstStepIndex}`;
+      } else if (typeof msg.id === "string" && msg.id.length > 0) {
+        messageId = `msg_${openCodeId}_${msg.id}`;
       } else {
-        messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
+        messageId = `msg_${openCodeId}_${visibleIndex}`;
       }
-    }
 
-    visibleIndex++;
-    const parts = buildParts(msg, openCodeId, messageId);
+      visibleIndex++;
+      const parts = buildParts(msg, openCodeId, messageId);
 
-    const baseInfo: OpenCodeMessageRecord["info"] = {
-      id: messageId,
-      role,
-      sessionID: openCodeId,
-      agent: "omp",
-      model: { providerID: "omp", modelID: "omp", variant: "default" },
-      time: { created: createdAt, completed: createdAt },
-    };
-
-    if (role === "assistant") {
       const providerID = msg.provider ?? "omp";
       const modelID = msg.model ?? "omp";
       const variant = msg.variant ?? "default";
       const { tokens, cost } = mapOmpUsageToTokens(msg.usage, msg.cost);
+
+      let finish = "stop";
+      if (msg.stopReason === "toolUse") {
+        finish = "tool-calls";
+      } else if (msg.stopReason) {
+        finish = msg.stopReason;
+      } else if (parts.some((p) => p.type === "tool")) {
+        finish = "tool-calls";
+      }
+
       const record: OpenCodeMessageRecord = {
         info: {
-          ...baseInfo,
+          id: messageId,
+          role: "assistant",
+          sessionID: openCodeId,
           parentID: lastUserMessageId,
-          finish: "stop",
-          mode: "primary",
-          cost,
-          tokens,
+          agent: "omp",
           model: { id: modelID, providerID, modelID, variant },
           providerID,
           modelID,
           variant,
+          finish,
+          mode: "primary",
+          cost,
+          tokens,
+          time: { created: createdAt, completed: createdAt },
         },
         parts,
       };
       records.push(record);
       lastAssistantRecord = record;
-    } else {
-      records.push({ info: baseInfo, parts });
-      lastUserMessageId = messageId;
-      lastAssistantRecord = undefined;
+      asstStepIndex++;
     }
   }
 
