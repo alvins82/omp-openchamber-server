@@ -256,6 +256,21 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     const clientAuthJson = await clientAuthResp.json() as { token?: string };
     expect(typeof clientAuthJson.token).toBe("string");
 
+    // terminal sessions & touch (OpenChamber v1.21.0 compatibility)
+    const termSessionsResp = await fetch(`${BASE}api/terminal/sessions?cwd=${encodeURIComponent(testDir)}`);
+    expect(termSessionsResp.status).toBe(200);
+    const termSessionsJson = await termSessionsResp.json() as { sessions?: unknown[] };
+    expect(Array.isArray(termSessionsJson.sessions)).toBe(true);
+
+    const termTouchResp = await fetch(`${BASE}api/terminal/touch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionIds: ["term_1"] }),
+    });
+    expect(termTouchResp.status).toBe(200);
+    const termTouchJson = await termTouchResp.json() as { touched?: number };
+    expect(typeof termTouchJson.touched).toBe("number");
+
     // fs/serve (required for OpenChamber HTML/asset preview)
     const testHtmlFile = join(testDir, "test-preview.html");
     writeFileSync(testHtmlFile, "<!DOCTYPE html><html><body><h1>Hello OpenChamber</h1></body></html>");

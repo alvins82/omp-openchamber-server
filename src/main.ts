@@ -1552,6 +1552,12 @@ const MIME_TYPES: Record<string, string> = {
       if (path === "/api/terminal/shells") {
         return json({ shells: ["/bin/zsh", "/bin/bash"], defaultShell: Bun.env.SHELL || "/bin/zsh" });
       }
+      if (path === "/api/terminal/sessions") {
+        return json({ sessions: [] });
+      }
+      if (path === "/api/terminal/touch") {
+        return json({ touched: 0 });
+      }
       return json({ sessionId: "term_1", success: true });
     }
 

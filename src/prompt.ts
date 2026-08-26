@@ -35,7 +35,7 @@ interface OpenCodeTextPart {
   text?: string;
 }
 
-type OpenCodePart = OpenCodeTextPart | { type: "file"; [key: string]: unknown };
+type OpenCodePart = OpenCodeTextPart | { type: "file" | "image" | string; [key: string]: unknown } | Record<string, unknown>;
 
 interface PromptBody {
   parts?: OpenCodePart[];
@@ -249,7 +249,7 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
             });
           }
         } else {
-          const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+          const rawData = String(p.data).replace(/^data:[^;,]+;base64,/, "");
           images.push({
             type: "image",
             data: rawData,
@@ -286,7 +286,7 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
               });
             }
           } else {
-            const rawData = p.data.replace(/^data:[^;,]+;base64,/, "");
+            const rawData = String(p.data).replace(/^data:[^;,]+;base64,/, "");
             images.push({
               type: "image",
               data: rawData,

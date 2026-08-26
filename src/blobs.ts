@@ -21,7 +21,7 @@ export function getBlobsDir(customDir?: string): string {
 /**
  * Checks whether a given string is a blob reference (e.g. "blob:sha256:abcd...").
  */
-export function isBlobRef(value: unknown): value is string {
+export function isBlobRef(value: unknown): value is `blob:sha256:${string}` {
   return typeof value === "string" && value.startsWith(BLOB_PREFIX);
 }
 

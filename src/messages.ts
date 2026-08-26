@@ -372,9 +372,9 @@ function buildParts(
   for (const block of normalizedContentBlocks(msg)) {
     if (!block || typeof block !== "object") continue;
     const kind = block.type;
-    const raw = block as Record<string, unknown>;
+    const raw = block as unknown as Record<string, unknown>;
     if (kind === "text") {
-      const text = typeof block.text === "string" ? block.text : JSON.stringify(block);
+      const text = typeof raw.text === "string" ? raw.text : JSON.stringify(block);
       if (currentTextPart && currentTextPart.type === "text") {
         if (currentTextPart.text) currentTextPart.text += "\n";
         currentTextPart.text += text;
@@ -383,7 +383,7 @@ function buildParts(
         currentTextPart = { type: "text", text };
       }
     } else if (kind === "thinking") {
-      const text = typeof block.thinking === "string" ? block.thinking : JSON.stringify(block);
+      const text = typeof raw.thinking === "string" ? raw.thinking : JSON.stringify(block);
       if (currentTextPart && currentTextPart.type === "reasoning") {
         if (currentTextPart.text) currentTextPart.text += "\n";
         currentTextPart.text += text;
@@ -398,18 +398,11 @@ function buildParts(
     } else if (kind === "image") {
       flushText();
       const mime =
-        (typeof block.mimeType === "string" ? block.mimeType : undefined) ||
-        (typeof block.mime === "string" ? block.mime : undefined) ||
-        (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
-        (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
+        (typeof raw.mimeType === "string" ? raw.mimeType : undefined) ||
+        (typeof raw.mime === "string" ? raw.mime : undefined) ||
         "image/png";
-      const rawData =
-        (typeof block.data === "string" ? block.data : undefined) ||
-        (typeof raw.data === "string" ? (raw.data as string) : "");
-      const rawUrl =
-        (typeof block.url === "string" ? block.url : undefined) ||
-        (typeof raw.url === "string" ? (raw.url as string) : undefined) ||
-        "";
+      const rawData = typeof raw.data === "string" ? raw.data : "";
+      const rawUrl = typeof raw.url === "string" ? raw.url : "";
 
       let url = "";
       if (rawData) {
@@ -429,20 +422,12 @@ function buildParts(
     } else if (kind === "file") {
       flushText();
       const mime =
-        (typeof block.mime === "string" ? block.mime : undefined) ||
-        (typeof block.mimeType === "string" ? block.mimeType : undefined) ||
-        (typeof raw.mime === "string" ? (raw.mime as string) : undefined) ||
-        (typeof raw.mimeType === "string" ? (raw.mimeType as string) : undefined) ||
+        (typeof raw.mime === "string" ? raw.mime : undefined) ||
+        (typeof raw.mimeType === "string" ? raw.mimeType : undefined) ||
         "application/octet-stream";
-      const rawUrl =
-        (typeof block.url === "string" ? block.url : undefined) ||
-        (typeof raw.url === "string" ? (raw.url as string) : "");
-      const rawData =
-        (typeof block.data === "string" ? block.data : undefined) ||
-        (typeof raw.data === "string" ? (raw.data as string) : "");
-      const filename =
-        (typeof block.filename === "string" ? block.filename : undefined) ||
-        (typeof raw.filename === "string" ? (raw.filename as string) : undefined);
+      const rawUrl = typeof raw.url === "string" ? raw.url : "";
+      const rawData = typeof raw.data === "string" ? raw.data : "";
+      const filename = typeof raw.filename === "string" ? raw.filename : undefined;
 
       let url = rawUrl;
       if (rawData) {
@@ -453,7 +438,7 @@ function buildParts(
 
       parts.push({
         id:
-          (typeof block.id === "string" ? block.id : undefined) ||
+          (typeof raw.id === "string" ? raw.id : undefined) ||
           `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
         type: "file",
         mime,
