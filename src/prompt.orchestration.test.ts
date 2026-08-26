@@ -363,4 +363,54 @@ describe("promptSessionAsync orchestration", () => {
     expect(isSessionBusy(a.openCodeId, a.cwd)).toBe(false);
     expect(isSessionBusy(b.openCodeId, b.cwd)).toBe(false);
   });
+
+  test("delivers token breakdown and cost when completion event carries usage", async () => {
+    installFakeFactory();
+    const { openCodeId, cwd, sessionPath } = newSession();
+    const { events, stop } = captureEvents();
+
+    const res = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+      messageID: "msg_user_token_prompt",
+      parts: [{ type: "text", text: "count tokens" }],
+    });
+    expect(res.queued).toBe(true);
+
+    const t = lastTransport();
+    await waitFor(() => t.requestCount("prompt") === 1);
+
+    t.fire({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", text: "Answer with tokens" },
+    });
+
+    t.fire({
+      type: "agent_end",
+      usage: {
+        input: 5400,
+        output: 120,
+        cacheRead: 800,
+        cacheWrite: 0,
+        reasoning: 25,
+        cost: { total: 0.015 },
+      },
+    });
+    t.promptSettler()?.resolve();
+
+    await waitFor(() => !isSessionBusy(openCodeId, cwd), 1000);
+    stop();
+
+    const finalizedEvents = events.filter((e) => e.type === "message.updated" && info(e).role === "assistant" && info(e).finish === "stop");
+    expect(finalizedEvents.length).toBeGreaterThan(0);
+    const lastAsst = info(finalizedEvents.at(-1)!);
+    expect(lastAsst.tokens).toEqual({
+      input: 5400,
+      output: 120,
+      reasoning: 25,
+      cache: {
+        read: 800,
+        write: 0,
+      },
+    });
+    expect(lastAsst.cost).toBe(0.015);
+  });
 });

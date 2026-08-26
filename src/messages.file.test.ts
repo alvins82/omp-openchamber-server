@@ -299,5 +299,60 @@ expect(p1.text).toBe("(empty)");
     });
     expect(toolPart.state.output).toBe("");
   });
+
+  it("extracts token breakdown and cost from assistant messages with usage data", async () => {
+    const tokenSid = "sess-tokens-test-uuid";
+    const path = fileFor("tokens-session.jsonl", [
+      userMsg("u1", "Please inspect code", 1755927600000),
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "2026-08-23T00:00:05.000Z",
+        message: {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "Code looks good" }],
+          provider: "llama.cpp",
+          model: "Qwen3.8-27B",
+          usage: {
+            input: 19158,
+            output: 262,
+            cacheRead: 2500,
+            cacheWrite: 100,
+            reasoning: 50,
+            totalTokens: 21970,
+            cost: { input: 0.01, output: 0.02, total: 0.03 },
+          },
+          stopReason: "stop",
+          timestamp: 1755927605000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, tokenSid, TEST_DB);
+    expect(out).toHaveLength(2);
+    const asstInfo = out![1].info;
+    expect(asstInfo.tokens).toEqual({
+      input: 19158,
+      output: 262,
+      reasoning: 50,
+      cache: {
+        read: 2500,
+        write: 100,
+      },
+    });
+    expect(asstInfo.cost).toBe(0.03);
+
+    // Verify OpenChamber context usage calculation
+    const contextTokens = asstInfo.tokens!.input + asstInfo.tokens!.output + asstInfo.tokens!.reasoning + asstInfo.tokens!.cache.read + asstInfo.tokens!.cache.write;
+    expect(contextTokens).toBe(22070);
+    const contextLimit = 32768;
+    const percent = (contextTokens / contextLimit) * 100;
+    expect(percent).toBeCloseTo(67.35, 1);
+
+    // Verify OpenChamber goal token accounting snapshot (input + cache.read + output)
+    const goalSnapshotTokens = asstInfo.tokens!.input + asstInfo.tokens!.cache.read + asstInfo.tokens!.output;
+    expect(goalSnapshotTokens).toBe(21920);
+  });
 });
 

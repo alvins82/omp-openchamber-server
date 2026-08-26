@@ -1,5 +1,5 @@
 import { OmpRpcConnection, getCurrentModel, type OmpRpcEvent, type OmpRpcTransport } from "./rpc";
-import { invalidateMessageCache, recordUserMessageId } from "./messages";
+import { invalidateMessageCache, recordUserMessageId, mapOmpUsageToTokens, type TokenBreakdown } from "./messages";
 import { promptLogger } from "./logger";
 import { getOmpSessionByOpenCodeId, setOmpSessionTitle, toOpenCodeSessionId } from "./sessions";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
@@ -170,6 +170,8 @@ function emitAssistantInfo(
   finish?: "stop",
   cwd?: string,
   createdTime?: number,
+  tokens?: TokenBreakdown,
+  cost?: number,
 ): void {
   const dir = cwd || process.cwd();
   const created = createdTime ?? Date.now();
@@ -181,9 +183,9 @@ function emitAssistantInfo(
       parentID,
       agent: "omp",
       mode: "primary",
-      cost: 0,
+      cost: cost ?? 0,
       path: { cwd: dir, root: dir },
-      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      tokens: tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       model: {
         id: model.modelID,
         providerID: model.providerID,
@@ -616,10 +618,28 @@ export function createEventHandler(
   };
 
   let nonTerminalTimer: ReturnType<typeof setTimeout> | undefined;
+  let latestTokens: TokenBreakdown = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  let latestCost = 0;
 
   return (event: OmpRpcEvent) => {
     const type = event.type;
     if (typeof type !== "string") return;
+
+    const rawUsage = event.usage ??
+      (typeof event.data === "object" && event.data !== null ? (event.data as Record<string, unknown>).usage : undefined) ??
+      (typeof event.message === "object" && event.message !== null ? (event.message as Record<string, unknown>).usage : undefined) ??
+      (typeof event.assistantMessageEvent === "object" && event.assistantMessageEvent !== null ? (event.assistantMessageEvent as Record<string, unknown>).usage : undefined) ??
+      (typeof event.payload === "object" && event.payload !== null ? (event.payload as Record<string, unknown>).usage : undefined);
+
+    if (rawUsage) {
+      const mapped = mapOmpUsageToTokens(rawUsage, event.cost);
+      if (mapped.tokens.input > 0 || mapped.tokens.output > 0 || mapped.tokens.cache.read > 0 || mapped.tokens.cache.write > 0) {
+        latestTokens = mapped.tokens;
+      }
+      if (mapped.cost > 0) {
+        latestCost = (latestCost || 0) + mapped.cost;
+      }
+    }
 
     if (
       (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
@@ -628,7 +648,7 @@ export function createEventHandler(
       if (nonTerminalTimer) clearTimeout(nonTerminalTimer);
       finalizeCurrentPart();
       if (assistantMessageID) {
-        emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
+        emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
       }
       onComplete();
       return;
@@ -639,7 +659,7 @@ export function createEventHandler(
       nonTerminalTimer = setTimeout(() => {
         finalizeCurrentPart();
         if (assistantMessageID) {
-          emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime);
+          emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
         }
         onComplete();
       }, 1500);

@@ -16,6 +16,7 @@ import {
   searchMatchingSessionIds,
 } from "./title-db";
 import { emitSessionUpdated } from "./sse";
+import { mapOmpUsageToTokens, type TokenBreakdown } from "./messages";
 
 function ompSessionsRoot(): string {
   return join(Bun.env.HOME!, ".omp", "agent", "sessions");
@@ -64,6 +65,8 @@ interface SessionHeader {
   archived?: number;
   parentSession?: string;
   agent?: string;
+  tokens?: TokenBreakdown;
+  cost?: number;
 }
 
 export function encodeCwd(cwd: string): string {
@@ -146,6 +149,9 @@ export async function readSessionHeader(
 
     if (!header) return null;
 
+    let latestTokens: TokenBreakdown | undefined;
+    let latestCost: number | undefined;
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -161,6 +167,17 @@ export async function readSessionHeader(
           latestMetadata = { ...(latestMetadata || {}), ...entry.metadata };
         } else if (entry.type === "archive") {
           latestArchived = typeof entry.archived === "number" ? entry.archived : (entry.archived ? Date.now() : 0);
+        } else if (entry.type === "message" && entry.message?.role === "assistant") {
+          const raw = entry.message;
+          if (raw?.usage || raw?.cost) {
+            const mapped = mapOmpUsageToTokens(raw.usage, raw.cost);
+            if (mapped.tokens.input > 0 || mapped.tokens.output > 0 || mapped.tokens.cache.read > 0 || mapped.tokens.cache.write > 0) {
+              latestTokens = mapped.tokens;
+            }
+            if (mapped.cost > 0) {
+              latestCost = (latestCost ?? 0) + mapped.cost;
+            }
+          }
         } else if (!firstUserPrompt && entry.type === "session_init" && typeof entry.task === "string") {
           const clean = entry.task.replace(/\s+/g, " ").trim();
           if (clean && !isLowSignalTitleInput(clean)) {
@@ -195,6 +212,8 @@ export async function readSessionHeader(
     if (firstUserPrompt !== undefined) header.firstUserPrompt = firstUserPrompt;
     if (latestMetadata !== undefined) header.metadata = latestMetadata;
     if (latestArchived !== undefined) header.archived = latestArchived;
+    if (latestTokens !== undefined) header.tokens = latestTokens;
+    if (latestCost !== undefined) header.cost = latestCost;
     return header;
   } catch { /* file unreadable */ }
   return null;
@@ -240,8 +259,8 @@ async function buildOpenCodeSession(
       updated,
       ...(header.archived !== undefined ? { archived: header.archived } : {}),
     },
-    cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    cost: header.cost ?? 0,
+    tokens: header.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     metadata: header.metadata,
   };
 }
