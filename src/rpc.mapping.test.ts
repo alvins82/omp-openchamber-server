@@ -168,5 +168,6 @@ describe("embeddedOmpConfigOverlay", () => {
     const content = readFileSync(a, "utf8");
     expect(content).toContain("enableProjectConfig: false");
     expect(content).toContain("enabled: false");
+    expect(content).toContain("methodOrder: [remote, handoff, shake, soft]");
   });
 });
