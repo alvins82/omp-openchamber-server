@@ -302,6 +302,69 @@ describe("reduceToolPartState", () => {
     expect(state.status).toBe("completed");
     expect(state.output).toBe("");
   });
+
+  it("does not mutate output or status when tool_execution_update arrives for an already completed tool", () => {
+    const current: ToolPartState = {
+      status: "completed",
+      input: { name: "SiteAudit" },
+      output: "Spawned agent SiteAudit. completed: subagent yielded successfully.",
+      time: { start: 1000, end: 1500 },
+    };
+
+    const state = reduceToolPartState(
+      current,
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-task-1",
+        content: [{ type: "text", text: "Running agent SiteAudit..." }],
+      },
+      2000,
+      "task",
+    );
+
+    expect(state.status).toBe("completed");
+    expect(state.output).toBe("Spawned agent SiteAudit. completed: subagent yielded successfully.");
+    expect(state.time).toEqual({ start: 1000, end: 1500 });
+  });
+
+  it("replaces rather than endlessly concatenates status progress updates for task tools", () => {
+    let state: ToolPartState = {
+      status: "running",
+      input: { name: "SiteAudit" },
+      output: "Running agent SiteAudit...",
+      time: { start: 1000 },
+    };
+
+    // Second progress tick with same text
+    state = reduceToolPartState(
+      state,
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-task-1",
+        content: [{ type: "text", text: "Running agent SiteAudit..." }],
+      },
+      2000,
+      "task",
+    );
+
+    expect(state.status).toBe("running");
+    expect(state.output).toBe("Running agent SiteAudit...");
+
+    // Third progress tick with new text
+    state = reduceToolPartState(
+      state,
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-task-1",
+        content: [{ type: "text", text: "Running agent SiteAudit (evaluating JS)..." }],
+      },
+      3000,
+      "task",
+    );
+
+    expect(state.status).toBe("running");
+    expect(state.output).toBe("Running agent SiteAudit (evaluating JS)...");
+  });
 });
 
 
