@@ -65,6 +65,7 @@ interface SessionHeader {
   archived?: number;
   parentSession?: string;
   agent?: string;
+  model?: { providerID: string; modelID: string; variant?: string };
   tokens?: TokenBreakdown;
   cost?: number;
 }
@@ -151,6 +152,7 @@ export async function readSessionHeader(
 
     let latestTokens: TokenBreakdown | undefined;
     let latestCost: number | undefined;
+    let latestModel: { providerID: string; modelID: string; variant?: string } | undefined;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
@@ -167,8 +169,31 @@ export async function readSessionHeader(
           latestMetadata = { ...(latestMetadata || {}), ...entry.metadata };
         } else if (entry.type === "archive") {
           latestArchived = typeof entry.archived === "number" ? entry.archived : (entry.archived ? Date.now() : 0);
+        } else if (entry.type === "model_change") {
+          const rawModel = typeof entry.model === "string" ? entry.model : (typeof entry.modelID === "string" ? entry.modelID : "");
+          const slash = rawModel.indexOf("/");
+          if (slash !== -1) {
+            latestModel = {
+              providerID: rawModel.slice(0, slash),
+              modelID: rawModel.slice(slash + 1),
+              variant: typeof entry.role === "string" ? entry.role : "default",
+            };
+          } else if (rawModel) {
+            latestModel = {
+              providerID: typeof entry.providerID === "string" ? entry.providerID : (typeof entry.provider === "string" ? entry.provider : "omp"),
+              modelID: rawModel,
+              variant: typeof entry.role === "string" ? entry.role : "default",
+            };
+          }
         } else if (entry.type === "message" && entry.message?.role === "assistant") {
           const raw = entry.message;
+          if (typeof raw?.provider === "string" && typeof raw?.model === "string") {
+            latestModel = {
+              providerID: raw.provider,
+              modelID: raw.model,
+              variant: typeof raw.variant === "string" ? raw.variant : "default",
+            };
+          }
           if (raw?.usage || raw?.cost) {
             const mapped = mapOmpUsageToTokens(raw.usage, raw.cost);
             if (mapped.tokens.input > 0 || mapped.tokens.output > 0 || mapped.tokens.cache.read > 0 || mapped.tokens.cache.write > 0) {
@@ -212,6 +237,7 @@ export async function readSessionHeader(
     if (firstUserPrompt !== undefined) header.firstUserPrompt = firstUserPrompt;
     if (latestMetadata !== undefined) header.metadata = latestMetadata;
     if (latestArchived !== undefined) header.archived = latestArchived;
+    if (latestModel !== undefined) header.model = latestModel;
     if (latestTokens !== undefined) header.tokens = latestTokens;
     if (latestCost !== undefined) header.cost = latestCost;
     return header;
@@ -252,7 +278,14 @@ async function buildOpenCodeSession(
     title,
     ...(header.parentSession ? { parentID: toOpenCodeSessionId(header.parentSession) } : {}),
     agent: header.agent || "omp",
-    model: { id: "omp", providerID: "omp", modelID: "omp", variant: "default" },
+    model: header.model
+      ? {
+          id: header.model.modelID,
+          providerID: header.model.providerID,
+          modelID: header.model.modelID,
+          variant: header.model.variant || "default",
+        }
+      : { id: "omp", providerID: "omp", modelID: "omp", variant: "default" },
     version: header.version || "0.0.0",
     time: {
       created,
