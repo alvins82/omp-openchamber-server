@@ -26,7 +26,7 @@ export function embeddedOmpConfigOverlay(): string {
       : "\n";
   writeFileSync(
     file,
-    `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true\nbrowser.headless: false\nbrowser.relay: false${extensionsConfig}`,
+    `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true\nbrowser.enabled: false\nbrowser.relay: false${extensionsConfig}`,
   );
   return file;
 }
@@ -231,6 +231,7 @@ export class OmpRpcConnection {
           OmpRpcConnection.READY_TIMEOUT_MS,
           `OMP not responsive after ${OmpRpcConnection.READY_TIMEOUT_MS / 1000}s (attempt ${attempt}/${maxAttempts})`,
         );
+        await conn.request("set_subagent_subscription", { level: "events" }).catch(() => {});
         return conn;
       } catch (err) {
         lastError = err;
