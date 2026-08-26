@@ -187,10 +187,39 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out).toHaveLength(2);
     expect(out![1].info.finish).toBe("stop");
     expect(out![1].parts).toHaveLength(1);
-const p1 = out![1].parts[0] as { type: string; text?: string };
-expect(p1.type).toBe("text");
-expect(p1.text).toBe("(empty)");
-    
+    const p1 = out![1].parts[0] as { type: string; text?: string };
+    expect(p1.type).toBe("text");
+    expect(p1.text).toBe("(empty)");
+  });
+
+  it("provider error assistant turn yields a visible error text part and info.error", async () => {
+    const path = fileFor("provider_error.jsonl", [
+      userMsg("u_err", "build hangar"),
+      {
+        type: "message",
+        id: "a_err",
+        parentId: "u_err",
+        timestamp: "2026-08-26T22:32:08.382Z",
+        message: {
+          role: "assistant",
+          content: [],
+          provider: "vllm",
+          model: "qwen3.8-27b",
+          stopReason: "error",
+          errorMessage: "400 At most 1 image(s) may be provided in one prompt.",
+          errorStatus: 400,
+          timestamp: 1755927608000,
+        },
+      },
+    ]);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    expect(out).toHaveLength(2);
+    expect(out![1].info.finish).toBe("error");
+    expect((out![1].info.error as { message: string })?.message).toBe("400 At most 1 image(s) may be provided in one prompt.");
+    expect(out![1].parts).toHaveLength(1);
+    const part = out![1].parts[0] as { type: string; text?: string };
+    expect(part.type).toBe("text");
+    expect(part.text).toContain("400 At most 1 image(s) may be provided in one prompt.");
   });
 
   it("ignores message-type entries without an inner message", async () => {

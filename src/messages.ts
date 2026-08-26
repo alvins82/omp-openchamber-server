@@ -31,6 +31,7 @@ export interface OpenCodeMessageRecord {
       cache: { read: number; write: number };
     };
     finish?: string;
+    error?: unknown;
     time: { created: number; completed?: number };
   };
   parts: Array<OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart>;
@@ -190,6 +191,10 @@ export interface AgentMessage {
   model?: string;
   variant?: string;
   stopReason?: string;
+  errorMessage?: string;
+  errorStatus?: number;
+  errorId?: string | number;
+  error?: unknown;
   display?: boolean;
   attribution?: "user" | "assistant";
   timestamp?: number;
@@ -463,10 +468,14 @@ function buildParts(
 
   if (parts.length === 0 && startIndex === 0) {
     const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+    const rawError = typeof msg.errorMessage === "string" ? msg.errorMessage : (typeof msg.error === "string" ? msg.error : undefined);
+    const text = (msg.stopReason === "error" || rawError)
+      ? (rawError ? `⚠️ **Provider Error**: ${rawError}` : "⚠️ **Provider Error**: Turn ended with error.")
+      : "(empty)";
     parts.push({
       id: `part_${openCodeId}_${messageId}_0`,
       type: "text",
-      text: "(empty)",
+      text,
       time: { start: msgTime, end: msgTime },
       messageID: messageId,
       sessionID: openCodeId,
@@ -658,6 +667,9 @@ export function mapRpcMessagesToOpenCodeRecords(
         finish = msg.stopReason;
       }
 
+      const rawError = typeof msg.errorMessage === "string" ? msg.errorMessage : (typeof msg.error === "string" ? msg.error : undefined);
+      const errorObj = rawError ? { message: rawError } : (msg.stopReason === "error" ? { message: "Turn ended with error" } : undefined);
+
       if (lastAssistantRecord) {
         const parts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
         lastAssistantRecord.parts.push(...parts);
@@ -668,6 +680,9 @@ export function mapRpcMessagesToOpenCodeRecords(
           lastAssistantRecord.info.finish = "tool-calls";
         } else {
           lastAssistantRecord.info.finish = "stop";
+        }
+        if (errorObj) {
+          lastAssistantRecord.info.error = errorObj;
         }
         if (tokens.input > 0 || tokens.output > 0 || tokens.cache.read > 0 || tokens.cache.write > 0) {
           lastAssistantRecord.info.tokens = tokens;
@@ -718,6 +733,7 @@ export function mapRpcMessagesToOpenCodeRecords(
             modelID,
             variant,
             finish,
+            error: errorObj,
             mode: "primary",
             cost,
             tokens,
