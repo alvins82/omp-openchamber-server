@@ -158,6 +158,38 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(done).toBe(1);
   });
 
+  it("background tool_execution_update events do not fragment an in-flight reasoning stream", () => {
+    runTurn([
+      toolEvent("tool_execution_start", { toolCallId: "bg1", tool: "task", arguments: "{}" }),
+      thinkDelta("Thinking step 1... "),
+      toolEvent("tool_execution_update", { toolCallId: "bg1", output: "Running agent..." }),
+      thinkDelta("Thinking step 2... "),
+      toolEvent("tool_execution_update", { toolCallId: "bg1", output: "Running agent (evaluating)..." }),
+      thinkDelta("Thinking step 3."),
+      agentEnd(),
+    ]);
+
+    const reasoningStartParts = got
+      .filter((e) => e.type === "message.part.updated")
+      .map((e) => (e.properties as { part: Part }).part)
+      .filter((p) => p.type === "reasoning" && p.time?.end === undefined);
+
+    // Exactly 1 reasoning part was started, not 3!
+    expect(reasoningStartParts.length).toBe(1);
+
+    const deltas = got.filter((e) => e.type === "message.part.delta");
+    expect(deltas.length).toBe(2);
+
+    const finalizedReasoning = got
+      .filter((e) => e.type === "message.part.updated")
+      .map((e) => (e.properties as { part: Part }).part)
+      .filter((p) => p.type === "reasoning" && p.time?.end !== undefined);
+
+    expect(finalizedReasoning.length).toBe(1);
+    expect(finalizedReasoning[0].text).toBe("Thinking step 1... Thinking step 2... Thinking step 3.");
+    expect(done).toBe(1);
+  });
+
   it("tool execution events reduce into one running then completed part", () => {
     runTurn([
       toolEvent("tool_execution_start",
