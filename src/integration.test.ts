@@ -707,6 +707,28 @@ await new Promise((r) => setTimeout(r, 60));
     expect(spawnLogLines()).toBe(before + 1);
   });
 
+  test("browser control routes: claim, result, and internal request coordinate over SSE", async () => {
+    // 1. Claim nonexistent request returns granted: false
+    const claimRes = await (
+      await fetch(BASE + "api/browser-control/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "nonexistent-req" }),
+      })
+    ).json();
+    expect(claimRes).toEqual({ granted: false });
+
+    // 2. Result for nonexistent request returns matched: false
+    const resultRes = await (
+      await fetch(BASE + "api/browser-control/result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "nonexistent-req", ok: true }),
+      })
+    ).json();
+    expect(resultRes).toEqual({ matched: false });
+  });
+
   test("SIGTERM propagates to the omp child, which postmortes the session file, and exits 0", async () => {
     sidecar.kill();
     const code = await sidecar.exited;

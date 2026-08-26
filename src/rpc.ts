@@ -11,9 +11,23 @@ export function embeddedOmpConfigOverlay(): string {
   const dir = join(tmpdir(), "oc-omp-embedded");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "config.yml");
-  const extPath = join(import.meta.dir, "..", "extensions", "question.ts");
-  const extensionsConfig = existsSync(extPath) ? `\nextensions:\n  - ${JSON.stringify(extPath)}\n` : "\n";
-  writeFileSync(file, `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true${extensionsConfig}`);
+  const extensionsDir = join(import.meta.dir, "..", "extensions");
+  const extensionPaths: string[] = [];
+  if (existsSync(extensionsDir)) {
+    const extFiles = ["question.ts", "openchamber_web.ts"];
+    for (const f of extFiles) {
+      const p = join(extensionsDir, f);
+      if (existsSync(p)) extensionPaths.push(p);
+    }
+  }
+  const extensionsConfig =
+    extensionPaths.length > 0
+      ? `\nextensions:\n${extensionPaths.map((p) => `  - ${JSON.stringify(p)}`).join("\n")}\n`
+      : "\n";
+  writeFileSync(
+    file,
+    `mcp.enableProjectConfig: false\nedit.autoRepair.enabled: true\nbrowser.headless: false\nbrowser.relay: false${extensionsConfig}`,
+  );
   return file;
 }
 
@@ -177,8 +191,16 @@ export class OmpRpcConnection {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // detached: the child leads its own process group so kill() can take
       // down MCP/LSP grandchildren instead of orphaning them.
-      const extPath = join(import.meta.dir, "..", "extensions", "question.ts");
-      const extArgs = existsSync(extPath) ? ["--extension", extPath] : [];
+      const extensionsDir = join(import.meta.dir, "..", "extensions");
+      const extArgs: string[] = [];
+      if (existsSync(extensionsDir)) {
+        for (const f of ["question.ts", "openchamber_web.ts"]) {
+          const p = join(extensionsDir, f);
+          if (existsSync(p)) {
+            extArgs.push("--extension", p);
+          }
+        }
+      }
       const proc = Bun.spawn(
         [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...extArgs],
         {
