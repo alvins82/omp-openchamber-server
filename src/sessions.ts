@@ -38,6 +38,7 @@ export interface OpenCodeSession {
   directory: string;
   path: string;
   title?: string;
+  parentID?: string;
   agent: string;
   model: ModelRef;
   version: string;
@@ -61,6 +62,8 @@ interface SessionHeader {
   firstUserPrompt?: string;
   metadata?: Record<string, unknown>;
   archived?: number;
+  parentSession?: string;
+  agent?: string;
 }
 
 export function encodeCwd(cwd: string): string {
@@ -123,6 +126,15 @@ export async function readSessionHeader(
                   ? String(entry.version)
                   : undefined,
             metadata: entry.metadata && typeof entry.metadata === "object" ? entry.metadata : undefined,
+            parentSession:
+              typeof entry.parentSession === "string"
+                ? entry.parentSession
+                : typeof entry.parentID === "string"
+                  ? entry.parentID
+                  : typeof entry.parentId === "string"
+                    ? entry.parentId
+                    : undefined,
+            agent: typeof entry.agent === "string" ? entry.agent : (typeof entry.mode === "string" ? entry.mode : undefined),
           };
           if (header.metadata) {
             latestMetadata = { ...(latestMetadata || {}), ...header.metadata };
@@ -149,6 +161,11 @@ export async function readSessionHeader(
           latestMetadata = { ...(latestMetadata || {}), ...entry.metadata };
         } else if (entry.type === "archive") {
           latestArchived = typeof entry.archived === "number" ? entry.archived : (entry.archived ? Date.now() : 0);
+        } else if (!firstUserPrompt && entry.type === "session_init" && typeof entry.task === "string") {
+          const clean = entry.task.replace(/\s+/g, " ").trim();
+          if (clean && !isLowSignalTitleInput(clean)) {
+            firstUserPrompt = clean.length > 60 ? `${clean.slice(0, 57)}...` : clean;
+          }
         } else if (!firstUserPrompt && entry.type === "message" && entry.message?.role === "user") {
           const content = entry.message.content;
           let promptText = "";
@@ -214,7 +231,8 @@ async function buildOpenCodeSession(
     directory: header.cwd,
     path: filePath,
     title,
-    agent: "omp",
+    ...(header.parentSession ? { parentID: toOpenCodeSessionId(header.parentSession) } : {}),
+    agent: header.agent || "omp",
     model: { id: "omp", providerID: "omp", modelID: "omp", variant: "default" },
     version: header.version || "0.0.0",
     time: {
@@ -409,30 +427,77 @@ export async function listOmpSessions(
 
   for (const dir of dirs) {
     const dirPath = join(ompSessionsRoot(), dir.name);
-    let files: string[];
-    try { files = await readdir(dirPath); } catch { continue; }
+    let dirents: { name: string; isFile(): boolean; isDirectory(): boolean }[];
+    try {
+      dirents = (await readdir(dirPath, { withFileTypes: true })) as unknown as {
+        name: string;
+        isFile(): boolean;
+        isDirectory(): boolean;
+      }[];
+    } catch { continue; }
 
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      const filePath = join(dirPath, file);
-      const header = await readSessionHeader(filePath);
-      if (!header) continue;
-      if (!all && header.cwd !== directory) continue;
-      if (archived !== true && !!header.archived) continue;
+    for (const ent of dirents) {
+      if (ent.isFile() && ent.name.endsWith(".jsonl")) {
+        const filePath = join(dirPath, ent.name);
+        const header = await readSessionHeader(filePath);
+        if (!header) continue;
+        if (!all && header.cwd !== directory) continue;
+        if (archived !== true && !!header.archived) continue;
 
-      if (searchLower) {
-        const titleMatch = header.title?.toLowerCase().includes(searchLower);
-        const promptMatch = header.firstUserPrompt?.toLowerCase().includes(searchLower);
-        const idMatch = header.id.toLowerCase().includes(searchLower);
-        const cwdMatch = header.cwd.toLowerCase().includes(searchLower);
-        const ftsMatch = matchingOmpIds?.has(header.id);
-        if (!titleMatch && !promptMatch && !idMatch && !cwdMatch && !ftsMatch) {
+        if (searchLower) {
+          const titleMatch = header.title?.toLowerCase().includes(searchLower);
+          const promptMatch = header.firstUserPrompt?.toLowerCase().includes(searchLower);
+          const idMatch = header.id.toLowerCase().includes(searchLower);
+          const cwdMatch = header.cwd.toLowerCase().includes(searchLower);
+          const ftsMatch = matchingOmpIds?.has(header.id);
+          if (!titleMatch && !promptMatch && !idMatch && !cwdMatch && !ftsMatch) {
+            continue;
+          }
+        }
+
+        sessions.push(await buildOpenCodeSession(header, filePath));
+        if (limit !== undefined && sessions.length >= limit) break;
+      } else if (ent.isDirectory()) {
+        const subDirPath = join(dirPath, ent.name);
+        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
+
+        let subFiles: string[];
+        try {
+          subFiles = await readdir(subDirPath);
+        } catch {
           continue;
         }
-      }
 
-      sessions.push(await buildOpenCodeSession(header, filePath));
-      if (limit !== undefined && sessions.length >= limit) break;
+        for (const subFile of subFiles) {
+          if (!subFile.endsWith(".jsonl")) continue;
+          const subFilePath = join(subDirPath, subFile);
+          const subHeader = await readSessionHeader(subFilePath);
+          if (!subHeader) continue;
+          if (!subHeader.parentSession && parentOmpUuid) {
+            subHeader.parentSession = parentOmpUuid;
+          }
+          if (!subHeader.title) {
+            subHeader.title = subFile.slice(0, -6);
+          }
+          if (!all && subHeader.cwd !== directory) continue;
+          if (archived !== true && !!subHeader.archived) continue;
+
+          if (searchLower) {
+            const titleMatch = subHeader.title?.toLowerCase().includes(searchLower);
+            const promptMatch = subHeader.firstUserPrompt?.toLowerCase().includes(searchLower);
+            const idMatch = subHeader.id.toLowerCase().includes(searchLower);
+            const cwdMatch = subHeader.cwd.toLowerCase().includes(searchLower);
+            const ftsMatch = matchingOmpIds?.has(subHeader.id);
+            if (!titleMatch && !promptMatch && !idMatch && !cwdMatch && !ftsMatch) {
+              continue;
+            }
+          }
+
+          sessions.push(await buildOpenCodeSession(subHeader, subFilePath));
+          if (limit !== undefined && sessions.length >= limit) break;
+        }
+      }
     }
     if (limit !== undefined && sessions.length >= limit) break;
   }
@@ -464,20 +529,63 @@ export async function getOmpSessionByOpenCodeId(
 
   for (const dir of dirs) {
     const dirPath = join(ompSessionsRoot(), dir.name);
-    let files: string[];
-    try { files = await readdir(dirPath); } catch { continue; }
+    let dirents: { name: string; isFile(): boolean; isDirectory(): boolean }[];
+    try {
+      dirents = (await readdir(dirPath, { withFileTypes: true })) as unknown as {
+        name: string;
+        isFile(): boolean;
+        isDirectory(): boolean;
+      }[];
+    } catch { continue; }
 
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      const filePath = join(dirPath, file);
-      const header = await readSessionHeader(filePath);
-      if (!header) continue;
-      if (header.id === ompId) {
-        if (directory && header.cwd !== directory) continue;
-        return buildOpenCodeSession(header, filePath);
+    for (const ent of dirents) {
+      if (ent.isFile() && ent.name.endsWith(".jsonl")) {
+        const filePath = join(dirPath, ent.name);
+        const header = await readSessionHeader(filePath);
+        if (!header) continue;
+        if (header.id === ompId || toOpenCodeSessionId(header.id) === openCodeId) {
+          if (directory && header.cwd !== directory) continue;
+          return buildOpenCodeSession(header, filePath);
+        }
+      } else if (ent.isDirectory()) {
+        const subDirPath = join(dirPath, ent.name);
+        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
+
+        let subFiles: string[];
+        try {
+          subFiles = await readdir(subDirPath);
+        } catch {
+          continue;
+        }
+
+        for (const subFile of subFiles) {
+          if (!subFile.endsWith(".jsonl")) continue;
+          const subFilePath = join(subDirPath, subFile);
+          const subHeader = await readSessionHeader(subFilePath);
+          if (!subHeader) continue;
+          if (subHeader.id === ompId || toOpenCodeSessionId(subHeader.id) === openCodeId) {
+            if (!subHeader.parentSession && parentOmpUuid) {
+              subHeader.parentSession = parentOmpUuid;
+            }
+            if (!subHeader.title) {
+              subHeader.title = subFile.slice(0, -6);
+            }
+            if (directory && subHeader.cwd !== directory) continue;
+            return buildOpenCodeSession(subHeader, subFilePath);
+          }
+        }
       }
     }
   }
 
   return null;
+}
+
+export async function listOmpChildSessions(
+  parentOpenCodeId: string,
+  directory?: string | null,
+): Promise<OpenCodeSession[]> {
+  const allSessions = await listOmpSessions(directory, { all: !directory });
+  return allSessions.filter((s) => s.parentID === parentOpenCodeId);
 }
