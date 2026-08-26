@@ -98,6 +98,20 @@ describe("tool-normalize", () => {
         description: "Read index",
       });
     });
+
+    it("normalizes hub tool inputs by promoting single subagent id and stripping timeout/op", () => {
+      const input = {
+        op: "wait",
+        ids: ["SmokeTest"],
+        timeoutMs: 120000,
+        i: "Waiting for smoke-test subagent",
+      };
+      const normalized = normalizeToolInput("hub", input);
+      expect(normalized).toEqual({
+        subagent: "SmokeTest",
+        description: "Waiting for smoke-test subagent",
+      });
+    });
   });
 
   describe("normalizeToolOutput", () => {
@@ -119,7 +133,7 @@ describe("tool-normalize", () => {
       expect(normalizeToolOutput("bash", "hello world")).toBe("hello world");
     });
 
-    it("unwraps <task-result> XML envelopes from hub/job tools into clean output", () => {
+    it("unwraps <task-result> XML envelopes and boilerplate from hub/job tools into clean output", () => {
       const rawHubOutput = `## Completed (1)\n\n### SiteAudit [task] — completed\nLabel: SiteAudit\n\`\`\`\n<task-result id="SiteAudit" agent="task" status="completed" duration="27.3s">\n<meta lines="13" size="345B" />\n<output>\n{\n  "files": [\n    "index.html:5947"\n  ],\n  "lotsTotal": 132\n}\n</output>\n</task-result>\n\nSiteAudit is now idle — message it via \`hub\` to follow up; transcript at history://SiteAudit\n\`\`\``;
 
       const normalized = normalizeToolOutput("hub", rawHubOutput);
@@ -127,8 +141,10 @@ describe("tool-normalize", () => {
       expect(normalized).not.toContain("</task-result>");
       expect(normalized).not.toContain("<output>");
       expect(normalized).not.toContain("<meta lines");
-      expect(normalized).toContain('"lotsTotal": 132');
-      expect(normalized).toContain("SiteAudit is now idle");
+      expect(normalized).not.toContain("## Completed");
+      expect(normalized).not.toContain("SiteAudit [task] — completed");
+      expect(normalized).not.toContain("is now idle");
+      expect(normalized).toBe('{\n  "files": [\n    "index.html:5947"\n  ],\n  "lotsTotal": 132\n}');
     });
   });
 });
