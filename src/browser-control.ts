@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isAbsolute, join } from "node:path";
 
 export interface BrowserControlRequest {
   requestId: string;
@@ -33,6 +34,58 @@ export class BrowserControlError extends Error {
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_TIMEOUT_MS = 120_000;
+
+/**
+ * Normalizes browser open targets. If the input is a local file URL or filesystem
+ * path (relative or absolute), translates it into OpenChamber's authenticated
+ * internal asset endpoint (/api/fs/serve/...) so the in-app browser can render
+ * local HTML files directly without requiring an external HTTP server.
+ */
+export function normalizeBrowserUrlForOpen(
+  inputUrl: string,
+  baseDir = process.cwd(),
+  port = Number(process.env.OC_SIDECAR_PORT ?? 4096),
+): string {
+  const trimmed = inputUrl.trim();
+  if (!trimmed) return trimmed;
+
+  // Preserve HTTP/HTTPS URLs and about:blank
+  if (/^https?:\/\//i.test(trimmed) || trimmed.toLowerCase() === "about:blank") {
+    return trimmed;
+  }
+
+  let localPath: string;
+  if (trimmed.startsWith("file://")) {
+    try {
+      const parsed = new URL(trimmed);
+      localPath = decodeURIComponent(parsed.pathname);
+    } catch {
+      localPath = trimmed.replace(/^file:\/\//i, "");
+    }
+  } else {
+    localPath = trimmed;
+  }
+
+  const home = process.env.HOME || "/tmp";
+  let resolved: string;
+  if (!localPath || localPath === "~") {
+    resolved = home;
+  } else if (localPath.startsWith("~/")) {
+    resolved = join(home, localPath.slice(2));
+  } else if (isAbsolute(localPath)) {
+    resolved = localPath;
+  } else {
+    resolved = join(baseDir, localPath);
+  }
+
+  const encodedPath = resolved
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  const normalizedPath = encodedPath.startsWith("/") ? encodedPath : `/${encodedPath}`;
+
+  return `http://127.0.0.1:${port}/api/fs/serve${normalizedPath}?oc_url_token=omp-local-url-token`;
+}
 
 interface PendingEntry {
   finish: (outcome: BrowserControlOutcome) => void;
@@ -74,7 +127,12 @@ export class BrowserControlBroker {
   request(
     action: string,
     parameters: Record<string, unknown> = {},
-    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+    options: {
+      timeoutMs?: number;
+      signal?: AbortSignal;
+      baseDir?: string;
+      port?: number;
+    } = {},
   ): Promise<unknown> {
     const requestId = this.createId();
     const boundedTimeout = Math.min(
@@ -82,7 +140,26 @@ export class BrowserControlBroker {
       MAX_TIMEOUT_MS,
     );
 
-    const listenerCount = this.emitRequest({ requestId, action, parameters });
+    let normalizedParams = parameters;
+    if (
+      (action === "browser.open" || action === "open") &&
+      typeof parameters.url === "string"
+    ) {
+      normalizedParams = {
+        ...parameters,
+        url: normalizeBrowserUrlForOpen(
+          parameters.url,
+          options.baseDir,
+          options.port,
+        ),
+      };
+    }
+
+    const listenerCount = this.emitRequest({
+      requestId,
+      action,
+      parameters: normalizedParams,
+    });
     if (listenerCount === 0) {
       return Promise.reject(
         new BrowserControlError(

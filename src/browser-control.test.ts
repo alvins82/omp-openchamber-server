@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   BrowserControlBroker,
   BrowserControlError,
+  normalizeBrowserUrlForOpen,
   type BrowserControlRequest,
 } from "./browser-control";
 import {
@@ -237,5 +238,98 @@ describe("Browser control broker integration", () => {
     expect(result).toEqual({ url: "http://127.0.0.1:3000", opened: true });
 
     await reader.cancel();
+  });
+
+  it("translates local file and file:// URLs to authenticated /api/fs/serve endpoint", async () => {
+    let captured: BrowserControlRequest | null = null;
+    const broker = new BrowserControlBroker({
+      emitRequest: (req) => {
+        captured = req;
+        return 1;
+      },
+      createId: () => "req-file-1",
+    });
+
+    const promise = broker.request(
+      "browser.open",
+      { url: "file:///Users/alvin/claude-cowork/hangar5/index.html" },
+      { baseDir: "/Users/alvin/claude-cowork/hangar5", port: 4096 },
+    );
+
+    expect(captured).not.toBeNull();
+    expect(captured!.action).toBe("browser.open");
+    expect(captured!.parameters.url).toBe(
+      "http://127.0.0.1:4096/api/fs/serve/Users/alvin/claude-cowork/hangar5/index.html?oc_url_token=omp-local-url-token",
+    );
+
+    broker.resolve("req-file-1", {
+      ok: true,
+      data: { url: captured!.parameters.url, opened: true },
+    });
+
+    const res = await promise;
+    expect(res).toEqual({
+      url: "http://127.0.0.1:4096/api/fs/serve/Users/alvin/claude-cowork/hangar5/index.html?oc_url_token=omp-local-url-token",
+      opened: true,
+    });
+  });
+
+  it("translates relative HTML filenames using baseDir", async () => {
+    let captured: BrowserControlRequest | null = null;
+    const broker = new BrowserControlBroker({
+      emitRequest: (req) => {
+        captured = req;
+        return 1;
+      },
+      createId: () => "req-file-2",
+    });
+
+    const promise = broker.request(
+      "browser.open",
+      { url: "index.html" },
+      { baseDir: "/Users/test/my-project", port: 4096 },
+    );
+
+    expect(captured).not.toBeNull();
+    expect(captured!.parameters.url).toBe(
+      "http://127.0.0.1:4096/api/fs/serve/Users/test/my-project/index.html?oc_url_token=omp-local-url-token",
+    );
+
+    broker.resolve("req-file-2", { ok: true });
+    await promise;
+  });
+});
+
+describe("normalizeBrowserUrlForOpen", () => {
+  it("leaves standard web and loopback URLs untouched", () => {
+    expect(normalizeBrowserUrlForOpen("http://localhost:3000")).toBe("http://localhost:3000");
+    expect(normalizeBrowserUrlForOpen("https://example.com/demo")).toBe("https://example.com/demo");
+    expect(normalizeBrowserUrlForOpen("http://127.0.0.1:8377/index.html")).toBe("http://127.0.0.1:8377/index.html");
+    expect(normalizeBrowserUrlForOpen("about:blank")).toBe("about:blank");
+  });
+
+  it("converts file:// URIs to /api/fs/serve URL", () => {
+    const converted = normalizeBrowserUrlForOpen(
+      "file:///Users/alvin/claude-cowork/hangar5/index.html",
+      "/Users/alvin/claude-cowork/hangar5",
+      4096,
+    );
+    expect(converted).toBe(
+      "http://127.0.0.1:4096/api/fs/serve/Users/alvin/claude-cowork/hangar5/index.html?oc_url_token=omp-local-url-token",
+    );
+  });
+
+  it("converts relative paths to /api/fs/serve URL using baseDir", () => {
+    const converted = normalizeBrowserUrlForOpen("index.html", "/Users/alvin/workspace", 4096);
+    expect(converted).toBe(
+      "http://127.0.0.1:4096/api/fs/serve/Users/alvin/workspace/index.html?oc_url_token=omp-local-url-token",
+    );
+  });
+
+  it("converts absolute filesystem paths to /api/fs/serve URL", () => {
+    const converted = normalizeBrowserUrlForOpen("/tmp/preview.html", "/any/dir", 8080);
+    expect(converted).toBe(
+      "http://127.0.0.1:8080/api/fs/serve/tmp/preview.html?oc_url_token=omp-local-url-token",
+    );
   });
 });
