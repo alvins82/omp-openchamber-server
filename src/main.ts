@@ -16,7 +16,9 @@ import {
   emitPermissionReplied,
   emitQuestionReplied,
   emitQuestionRejected,
+  emitBrowserControlRequest,
 } from "./sse";
+import { BrowserControlBroker, BrowserControlError } from "./browser-control";
 import {
   listPendingPermissions,
   listPendingQuestions,
@@ -72,6 +74,10 @@ function createProjectIdFromPath(projectPath: string): string {
 
 const providerCache = new Map<string, { data: OpenCodeProvidersResponse; expiresAt: number }>();
 let globalProviderCache: { data: OpenCodeProvidersResponse; expiresAt: number } | null = null;
+
+export const browserControlBroker = new BrowserControlBroker({
+  emitRequest: emitBrowserControlRequest,
+});
 
 async function fetchProvidersForDirectory(cwd: string): Promise<OpenCodeProvidersResponse> {
   const cached = providerCache.get(cwd) ?? globalProviderCache;
@@ -279,6 +285,41 @@ const server = Bun.serve({
 
       if (path === "/api/client-auth/clients") {
         return json({ token: "omp-local-token" });
+      }
+
+      // Browser Control Claim
+      if ((path === "/api/browser-control/claim" || path === "/browser-control/claim") && req.method === "POST") {
+        const body = (await readJson(req)) as { requestId?: string } | undefined;
+        const requestId = body?.requestId?.trim() || "";
+        if (!requestId) return jsonError("requestId is required", 400);
+        return json({ granted: browserControlBroker.claim(requestId) });
+      }
+
+      // Browser Control Result
+      if ((path === "/api/browser-control/result" || path === "/browser-control/result") && req.method === "POST") {
+        const body = (await readJson(req)) as { requestId?: string; ok?: boolean; data?: unknown; error?: string } | undefined;
+        const requestId = body?.requestId?.trim() || "";
+        if (!requestId) return jsonError("requestId is required", 400);
+        const matched = browserControlBroker.resolve(requestId, {
+          ok: body?.ok === true,
+          data: body?.data,
+          error: body?.error,
+        });
+        return json({ matched });
+      }
+
+      // Internal Browser Control Request (used by openchamber_web extension)
+      if (path === "/internal/browser-control/request" && req.method === "POST") {
+        const body = (await readJson(req)) as { action?: string; parameters?: Record<string, unknown>; timeoutMs?: number } | undefined;
+        const action = body?.action?.trim() || "";
+        if (!action) return jsonError("action is required", 400);
+        try {
+          const data = await browserControlBroker.request(action, body?.parameters ?? {}, { timeoutMs: body?.timeoutMs });
+          return json({ ok: true, data });
+        } catch (err) {
+          const status = err instanceof BrowserControlError ? err.status : 500;
+          return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status });
+        }
       }
 
       // Directory Explorer (OpenChamber Add Project Dialog)
@@ -768,7 +809,9 @@ const server = Bun.serve({
         p === "/global/event" ||
         p === "/openchamber/events"
       ) {
-        return new Response(createOpenCodeEventStream(dir), {
+        const isBrowserParam = url.searchParams.get("browser") === "1";
+        const isOpenChamberStream = p === "/openchamber/events";
+        return new Response(createOpenCodeEventStream(dir, { browserCapable: isBrowserParam, isOpenChamber: isOpenChamberStream }), {
           headers: {
             ...cors,
             "Content-Type": "text/event-stream",
@@ -1554,6 +1597,7 @@ function handleShutdownSignal(signal: string) {
     // ignore
   }
   try {
+    browserControlBroker.rejectAll("Server shutting down");
     shutdownAll();
   } catch {
     // ignore

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { BrowserControlRequest } from "./browser-control";
 
 export interface OpenCodeEvent {
   type: string;
@@ -8,7 +9,16 @@ export interface OpenCodeEvent {
 
 type Listener = (event: OpenCodeEvent) => void;
 
-let listeners = new Set<Listener>();
+interface SseClient {
+  id: string;
+  directory?: string;
+  browserCapable: boolean;
+  isOpenChamber: boolean;
+  enqueue: (chunk: string) => void;
+}
+
+const listeners = new Set<Listener>();
+const activeClients = new Set<SseClient>();
 let eventCounter = 0;
 
 export function emitOpenCodeEvent(
@@ -39,6 +49,9 @@ export function formatOpenCodeEvent(
   directory?: string,
   id?: string,
 ): string {
+  if (type.startsWith("openchamber:")) {
+    return `data: ${JSON.stringify({ type, properties })}\n\n`;
+  }
   const evtId = id ?? `evt_${randomUUID().replace(/-/g, "")}`;
   const payload = {
     id: evtId,
@@ -49,9 +62,71 @@ export function formatOpenCodeEvent(
   return `data: ${JSON.stringify(body)}\n\n`;
 }
 
-export function createOpenCodeEventStream(defaultDirectory?: string): ReadableStream<Uint8Array> {
+export function emitBrowserControlRequest(request: BrowserControlRequest): number {
+  const eventText = `data: ${JSON.stringify({
+    type: "openchamber:browser-control-request",
+    properties: {
+      requestId: request.requestId,
+      action: request.action,
+      parameters: request.parameters,
+    },
+  })}\n\n`;
+
+  const needsBrowserView = request.action !== "browser.open";
+  let delivered = 0;
+
+  for (const client of activeClients) {
+    if (needsBrowserView && !client.browserCapable) {
+      continue;
+    }
+    try {
+      client.enqueue(eventText);
+      delivered += 1;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Also emit through standard OpenCode listener pipeline for completeness
+  emitOpenCodeEvent("openchamber:browser-control-request", {
+    requestId: request.requestId,
+    action: request.action,
+    parameters: request.parameters,
+  });
+
+  return delivered;
+}
+
+export function getActiveSseClientCount(): number {
+  return activeClients.size;
+}
+
+export function createOpenCodeEventStream(
+  defaultDirectory?: string,
+  options?: { browserCapable?: boolean; isOpenChamber?: boolean },
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const controllerRef: { current?: ReadableStreamDefaultController<Uint8Array> } = {};
+  const clientId = `client_${randomUUID()}`;
+  const browserCapable = options?.browserCapable ?? true;
+  const isOpenChamber = options?.isOpenChamber ?? false;
+
+  const client: SseClient = {
+    id: clientId,
+    directory: defaultDirectory,
+    browserCapable,
+    isOpenChamber,
+    enqueue: (chunk: string) => {
+      const c = controllerRef.current;
+      if (c) {
+        try {
+          c.enqueue(encoder.encode(chunk));
+        } catch {
+          /* stream may be closed */
+        }
+      }
+    },
+  };
 
   const unsubscribe = subscribeOpenCodeEvents((event) => {
     const c = controllerRef.current;
@@ -70,7 +145,11 @@ export function createOpenCodeEventStream(defaultDirectory?: string): ReadableSt
     const c = controllerRef.current;
     if (!c) return;
     try {
-      c.enqueue(encoder.encode(formatOpenCodeEvent("server.heartbeat", {})));
+      if (isOpenChamber) {
+        c.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "openchamber:heartbeat", properties: {} })}\n\n`));
+      } else {
+        c.enqueue(encoder.encode(formatOpenCodeEvent("server.heartbeat", {})));
+      }
     } catch {
       /* closed */
     }
@@ -79,11 +158,17 @@ export function createOpenCodeEventStream(defaultDirectory?: string): ReadableSt
   return new ReadableStream({
     start(c) {
       controllerRef.current = c;
-      // Send initial server.connected event to trigger UI store initialization / refresh
-      c.enqueue(encoder.encode(formatOpenCodeEvent("server.connected", {})));
+      activeClients.add(client);
+      if (isOpenChamber) {
+        c.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "openchamber:event-stream-ready", properties: {} })}\n\n`));
+      } else {
+        // Send initial server.connected event to trigger UI store initialization / refresh
+        c.enqueue(encoder.encode(formatOpenCodeEvent("server.connected", {})));
+      }
     },
     cancel() {
       clearInterval(heartbeat);
+      activeClients.delete(client);
       unsubscribe();
       controllerRef.current = undefined;
     },
