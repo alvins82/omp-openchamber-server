@@ -280,7 +280,10 @@ const server = Bun.serve({
 
       // OpenChamber url-token & client token auth
       if (path === "/auth/url-token" || path === "/api/auth/url-token") {
-        return json({ authenticated: true, scope: "local" });
+        return json({
+          token: "omp-local-url-token",
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+        });
       }
 
       if (path === "/api/client-auth/clients") {

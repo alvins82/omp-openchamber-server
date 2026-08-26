@@ -232,6 +232,29 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
       body: JSON.stringify({ sessionId: "ses_test123", directory: testDir, id: "n1", kind: "note", pinned: true }),
     });
     expect(pinResp.status).toBe(200);
+
+    // auth/url-token (required for OpenChamber HTML/PDF/asset preview)
+    const urlTokenResp = await fetch(`${BASE}auth/url-token`, { method: "POST" });
+    expect(urlTokenResp.status).toBe(200);
+    const urlTokenJson = await urlTokenResp.json() as { token?: string; expiresAt?: number };
+    expect(typeof urlTokenJson.token).toBe("string");
+    expect(urlTokenJson.token!.length).toBeGreaterThan(0);
+    expect(typeof urlTokenJson.expiresAt).toBe("number");
+    expect(urlTokenJson.expiresAt!).toBeGreaterThan(Date.now());
+
+    const apiUrlTokenResp = await fetch(`${BASE}api/auth/url-token`, { method: "POST" });
+    expect(apiUrlTokenResp.status).toBe(200);
+    const apiUrlTokenJson = await apiUrlTokenResp.json() as { token?: string; expiresAt?: number };
+    expect(typeof apiUrlTokenJson.token).toBe("string");
+    expect(apiUrlTokenJson.token!.length).toBeGreaterThan(0);
+    expect(typeof apiUrlTokenJson.expiresAt).toBe("number");
+    expect(apiUrlTokenJson.expiresAt!).toBeGreaterThan(Date.now());
+
+    // client-auth/clients
+    const clientAuthResp = await fetch(`${BASE}api/client-auth/clients`);
+    expect(clientAuthResp.status).toBe(200);
+    const clientAuthJson = await clientAuthResp.json() as { token?: string };
+    expect(typeof clientAuthJson.token).toBe("string");
   });
 });
 
