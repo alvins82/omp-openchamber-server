@@ -37,6 +37,7 @@ import {
   removeSessionState,
   shutdownAll,
 } from "./prompt";
+import { extractTodosFromOmpDetails } from "./todo";
 import {
   withOmpRpc,
   getCurrentModel,
@@ -1044,15 +1045,7 @@ const MIME_TYPES: Record<string, string> = {
         if (!session) return jsonError("session not found", 404);
         const todos = await withOmpRpc(session.directory, async (conn) => {
           const raw = (await conn.request("get_state", {})) as Record<string, unknown>;
-          const phases = (raw?.todoPhases as Array<{ tasks?: Array<{ id?: string; content?: string; status?: string }> }>) || [];
-          return phases.flatMap((p) =>
-            (p.tasks || []).map((t) => ({
-              id: t.id ?? randomUUID(),
-              content: t.content ?? "",
-              status: t.status ?? "pending",
-              priority: "normal",
-            })),
-          );
+          return extractTodosFromOmpDetails({ todoPhases: raw?.todoPhases }) ?? [];
         }).catch(() => []);
         return json(todos);
       } catch (err) {

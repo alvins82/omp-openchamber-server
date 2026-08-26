@@ -12,6 +12,7 @@ import {
   emitSessionIdle,
   emitSessionStatus,
   emitSessionError,
+  emitTodoUpdated,
   emitPermissionAsked,
   emitQuestionAsked,
 } from "./sse";
@@ -24,6 +25,7 @@ import {
 } from "./approvals";
 import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
 import { isBlobRef, readBlobBufferSync } from "./blobs";
+import { isTodoTool, extractTodosFromOmpDetails } from "./todo";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
@@ -1047,6 +1049,22 @@ export function createEventHandler(
       const resolvedTool = tool ?? existing?.tool;
       const state = reduceToolPartState(existing?.state, payload, Date.now(), resolvedTool);
       emitToolPart(toolCallId, resolvedTool, state);
+
+      if (isTodoTool(resolvedTool) && (state.status === "completed" || type === "tool_execution_end")) {
+        const rawDetails = payload.details ?? (typeof payload.data === "object" && payload.data != null ? (payload.data as Record<string, unknown>).details : undefined) ?? event.details;
+        const todos = extractTodosFromOmpDetails(rawDetails, payload.result ?? payload.output);
+        if (todos) {
+          emitTodoUpdated(openCodeId, todos, cwd);
+        } else if (conn) {
+          conn.request("get_state", {}).then((raw) => {
+            const statePhases = (raw as Record<string, unknown>)?.todoPhases;
+            const fetchedTodos = extractTodosFromOmpDetails({ phases: statePhases });
+            if (fetchedTodos) {
+              emitTodoUpdated(openCodeId, fetchedTodos, cwd);
+            }
+          }).catch(() => {});
+        }
+      }
       return;
     }
 
@@ -1091,6 +1109,22 @@ export function createEventHandler(
       const resolvedTool = tool ?? existing?.tool;
       const state = reduceToolPartState(existing?.state, assistantMessageEvent, Date.now(), resolvedTool);
       emitToolPart(toolCallId, resolvedTool, state);
+
+      if (isTodoTool(resolvedTool) && (state.status === "completed" || eventType === "toolcall_end" || eventType === "tool_execution_end")) {
+        const rawDetails = assistantMessageEvent.details ?? (typeof assistantMessageEvent.data === "object" && assistantMessageEvent.data != null ? (assistantMessageEvent.data as Record<string, unknown>).details : undefined);
+        const todos = extractTodosFromOmpDetails(rawDetails, assistantMessageEvent.result ?? assistantMessageEvent.output);
+        if (todos) {
+          emitTodoUpdated(openCodeId, todos, cwd);
+        } else if (conn) {
+          conn.request("get_state", {}).then((raw) => {
+            const statePhases = (raw as Record<string, unknown>)?.todoPhases;
+            const fetchedTodos = extractTodosFromOmpDetails({ phases: statePhases });
+            if (fetchedTodos) {
+              emitTodoUpdated(openCodeId, fetchedTodos, cwd);
+            }
+          }).catch(() => {});
+        }
+      }
       return;
     }
   };
