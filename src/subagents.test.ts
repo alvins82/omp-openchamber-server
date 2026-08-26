@@ -146,4 +146,89 @@ describe("Subagents & Child Sessions Integration", () => {
 
     unsub();
   });
+
+  it("coalesces multi-step assistant turns with subagent tasks and aligns message IDs with streaming", async () => {
+    const { recordUserMessageId } = await import("./messages");
+    const parent = await createOmpSession(TEST_DIR, { title: "Subagent Test" });
+    const userMessageId = "msg_client_subagent_prompt";
+
+    // 1. Record client user message mapping
+    recordUserMessageId(parent.id, "Run generic subagent", userMessageId);
+
+    // 2. Simulate multi-step OMP transcript written to parent session file
+    const u1 = {
+      type: "message",
+      id: "u1_omp",
+      message: { role: "user", content: "Run generic subagent", timestamp: 1000 },
+    };
+    const asst1 = {
+      type: "message",
+      id: "a1_omp",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "I will spawn the SiteAudit subagent." },
+          { type: "toolCall", id: "call_task_1", name: "task", arguments: { name: "SiteAudit" } },
+        ],
+        stopReason: "toolUse",
+        timestamp: 2000,
+      },
+    };
+    const toolRes1 = {
+      type: "message",
+      id: "tr1_omp",
+      message: {
+        role: "toolResult",
+        toolCallId: "call_task_1",
+        toolName: "task",
+        content: "Spawned agent SiteAudit. completed: subagent yielded successfully.",
+        timestamp: 3000,
+      },
+    };
+    const asst2 = {
+      type: "message",
+      id: "a2_omp",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Subagent finished, writing summary." },
+          { type: "text", text: "Subagent test passed." },
+        ],
+        stopReason: "stop",
+        timestamp: 4000,
+      },
+    };
+
+    await Bun.write(
+      parent.path,
+      `${JSON.stringify({ type: "session", id: parent.id.replace(/^ses_/, ""), timestamp: new Date().toISOString(), cwd: TEST_DIR })}\n` +
+      `${JSON.stringify(u1)}\n${JSON.stringify(asst1)}\n${JSON.stringify(toolRes1)}\n${JSON.stringify(asst2)}\n`,
+    );
+
+    // 3. Load messages and verify coalescence and matching ID
+    const messages = await loadSessionMessages(parent.id, TEST_DIR);
+    expect(messages).toHaveLength(2);
+
+    expect(messages[0].info.id).toBe(userMessageId);
+    expect(messages[0].info.role).toBe("user");
+
+    const asstRecord = messages[1];
+    expect(asstRecord.info.id).toBe(`msg_${parent.id}_asst_${userMessageId}`);
+    expect(asstRecord.info.role).toBe("assistant");
+    expect(asstRecord.info.parentID).toBe(userMessageId);
+    expect(asstRecord.info.finish).toBe("stop");
+
+    // All parts across both assistant turns are unified in order
+    expect(asstRecord.parts).toHaveLength(4);
+    expect(asstRecord.parts[0].type).toBe("reasoning");
+    expect((asstRecord.parts[0] as any).text).toBe("I will spawn the SiteAudit subagent.");
+    expect(asstRecord.parts[1].type).toBe("tool");
+    expect((asstRecord.parts[1] as any).tool).toBe("task");
+    expect((asstRecord.parts[1] as any).state.status).toBe("completed");
+    expect((asstRecord.parts[1] as any).state.output).toBe("Spawned agent SiteAudit. completed: subagent yielded successfully.");
+    expect(asstRecord.parts[2].type).toBe("reasoning");
+    expect((asstRecord.parts[2] as any).text).toBe("Subagent finished, writing summary.");
+    expect(asstRecord.parts[3].type).toBe("text");
+    expect((asstRecord.parts[3] as any).text).toBe("Subagent test passed.");
+  });
 });

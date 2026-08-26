@@ -494,13 +494,19 @@ export function reduceToolPartState(
     state.status = "running";
     if (!state.time) state.time = { start: now };
   } else if (type === "tool_execution_update") {
-    if (state.status !== "completed" && state.status !== "error") {
-      state.status = "running";
+    if (state.status === "completed" || state.status === "error") {
+      return state;
     }
+    state.status = "running";
     const output = formatToolOutput(event.output ?? event.content ?? event.result ?? event.partialResult ?? event.partial_result ?? (typeof event.data === "object" && event.data != null ? event.data : undefined));
     if (output != null) {
       const normalizedOutput = normalizeToolOutput(resolvedToolName, output, rawDetails);
-      if (state.output && normalizedOutput && !normalizedOutput.startsWith(state.output)) {
+      if (
+        (resolvedToolName === "bash" || resolvedToolName === "terminal" || resolvedToolName === "exec") &&
+        state.output &&
+        normalizedOutput &&
+        !normalizedOutput.startsWith(state.output)
+      ) {
         state.output = state.output + "\n" + normalizedOutput;
       } else {
         state.output = normalizedOutput;
@@ -548,7 +554,10 @@ export function createEventHandler(
     if (hasStarted) return;
     hasStarted = true;
     assistantStartTime = Date.now();
-    assistantMessageID = makeMessageId(openCodeId, `assistant_${assistantStartTime}`);
+    assistantMessageID = makeMessageId(
+      openCodeId,
+      parentMessageID ? `asst_${parentMessageID}` : `assistant_${assistantStartTime}`,
+    );
     emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, undefined, cwd, assistantStartTime);
   };
 

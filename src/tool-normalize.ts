@@ -116,8 +116,29 @@ export function normalizeToolInput(
 }
 
 /**
+ * Strips model-facing <task-result> XML wrapper markup from subagent job outputs
+ * to present clean JSON or plain text in the OpenChamber UI.
+ */
+export function stripTaskResultEnvelope(text: string): string {
+  if (!text.includes("<task-result")) return text;
+  let stripped = text.replace(
+    /<task-result(?:\s[^>]*)?>[\s\S]*?<(?:output|preview)(?:\s[^>]*)?>\n?([\s\S]*?)\n?<\/(?:output|preview)>[\s\S]*?<\/task-result>/g,
+    (_, body) => body.trim(),
+  );
+  if (stripped.includes("<task-result")) {
+    stripped = stripped
+      .replace(/<task-result(?:\s[^>]*)?>/g, "")
+      .replace(/<\/task-result>/g, "")
+      .replace(/<meta\s+[^>]*\/>/g, "")
+      .replace(/<\/?(?:output|preview)(?:\s[^>]*)?>/g, "");
+  }
+  return stripped.trim();
+}
+
+/**
  * Normalizes tool execution output to conform to OpenCode output expectations.
  * - For glob/find: returns "" for empty results and converts file arrays / OMP grouped paths to newline-delimited lists.
+ * - For tools containing <task-result>: unwraps inner output body.
  */
 export function normalizeToolOutput(
   toolName: string | undefined,
@@ -146,6 +167,10 @@ export function normalizeToolOutput(
     if (parsedPaths !== null) {
       return parsedPaths.join("\n");
     }
+  }
+
+  if (output.includes("<task-result")) {
+    return stripTaskResultEnvelope(output);
   }
 
   return output;

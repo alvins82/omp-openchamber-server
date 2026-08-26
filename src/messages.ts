@@ -237,6 +237,7 @@ function buildParts(
   msg: AgentMessage,
   openCodeId: string,
   messageId: string,
+  startIndex = 0,
 ): Array<OpenCodeTextPart | OpenCodeToolPart> {
   const parts: Array<OpenCodeTextPart | OpenCodeToolPart> = [];
   let currentTextPart: { type: "text" | "reasoning"; text: string } | null = null;
@@ -245,7 +246,7 @@ function buildParts(
     if (currentTextPart) {
       const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
       parts.push({
-        id: `part_${openCodeId}_${messageId}_${parts.length}`,
+        id: `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
         type: currentTextPart.type,
         text: currentTextPart.text || "(empty)",
         time: { start: msgTime, end: msgTime },
@@ -280,7 +281,7 @@ function buildParts(
     } else if (kind === "toolCall") {
       flushText();
       const startTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
-      parts.push(createToolPart(block, openCodeId, messageId, parts.length, startTime));
+      parts.push(createToolPart(block, openCodeId, messageId, startIndex + parts.length, startTime));
     } else {
       const text = JSON.stringify(block);
       if (currentTextPart && currentTextPart.type === "text") {
@@ -295,7 +296,7 @@ function buildParts(
 
   flushText();
 
-  if (parts.length === 0) {
+  if (parts.length === 0 && startIndex === 0) {
     const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
     parts.push({
       id: `part_${openCodeId}_${messageId}_0`,
@@ -384,6 +385,7 @@ export function mapRpcMessagesToOpenCodeRecords(
 ): OpenCodeMessageRecord[] {
   const records: OpenCodeMessageRecord[] = [];
   let lastUserMessageId: string | undefined;
+  let lastUserMatched = false;
   let lastAssistantRecord: OpenCodeMessageRecord | undefined;
   let visibleIndex = 0;
   const recordedList = getRecordedUserMessages(openCodeId, dbPath);
@@ -447,6 +449,7 @@ export function mapRpcMessagesToOpenCodeRecords(
         matchedRecordedIndices.add(matchedIndex);
         const match = recordedList[matchedIndex];
         messageId = match.clientMessageId;
+        lastUserMatched = true;
 
         // If not yet bound to omp_message_id, bind it now in SQLite & memory
         if (typeof msg.id === "string" && msg.id.length > 0 && match.ompMessageId !== msg.id) {
@@ -455,14 +458,28 @@ export function mapRpcMessagesToOpenCodeRecords(
         }
       } else if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
         messageId = msg.id;
+        lastUserMatched = false;
       } else {
         messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
+        lastUserMatched = false;
       }
 
       userMessageIndex++;
     } else {
+      if (lastAssistantRecord && lastUserMessageId && lastAssistantRecord.info.parentID === lastUserMessageId) {
+        const newParts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
+        lastAssistantRecord.parts.push(...newParts);
+        lastAssistantRecord.info.time.completed = createdAt;
+        if (msg.stopReason && msg.stopReason !== "toolUse") {
+          lastAssistantRecord.info.finish = msg.stopReason;
+        }
+        continue;
+      }
+
       if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
         messageId = msg.id;
+      } else if (lastUserMatched && lastUserMessageId) {
+        messageId = `msg_${openCodeId}_asst_${lastUserMessageId}`;
       } else {
         messageId = `msg_${openCodeId}_${msg.id ?? visibleIndex}`;
       }
