@@ -90,6 +90,13 @@ export interface UsageMappingResult {
   cost: number;
 }
 
+function firstPositive(...values: unknown[]): number {
+  for (const v of values) {
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  }
+  return 0;
+}
+
 export function mapOmpUsageToTokens(rawUsage: unknown, rawCost?: unknown): UsageMappingResult {
   const fallbackTokens: TokenBreakdown = {
     input: 0,
@@ -108,43 +115,71 @@ export function mapOmpUsageToTokens(rawUsage: unknown, rawCost?: unknown): Usage
 
   const u = rawUsage as Record<string, unknown>;
 
+  const promptDetails = (u.prompt_tokens_details && typeof u.prompt_tokens_details === "object")
+    ? (u.prompt_tokens_details as Record<string, unknown>)
+    : (u.promptTokensDetails && typeof u.promptTokensDetails === "object" ? (u.promptTokensDetails as Record<string, unknown>) : undefined);
+
+  const completionDetails = (u.completion_tokens_details && typeof u.completion_tokens_details === "object")
+    ? (u.completion_tokens_details as Record<string, unknown>)
+    : (u.completionTokensDetails && typeof u.completionTokensDetails === "object" ? (u.completionTokensDetails as Record<string, unknown>) : undefined);
+
+  const output = firstPositive(
+    u.output,
+    u.outputTokens,
+    u.output_tokens,
+    u.completion_tokens,
+    u.completionTokens,
+  );
+
+  const reasoning = firstPositive(
+    u.reasoning,
+    u.reasoningTokens,
+    u.reasoning_tokens,
+    completionDetails?.reasoning_tokens,
+    completionDetails?.reasoningTokens,
+  );
+
+  const cacheRead = firstPositive(
+    u.cacheRead,
+    u.cache_read,
+    u.cached_tokens,
+    u.cachedTokens,
+    promptDetails?.cached_tokens,
+    promptDetails?.cachedTokens,
+    u.cache_read_input_tokens,
+    promptDetails?.cache_read_input_tokens,
+    u.prompt_cache_hit_tokens,
+    promptDetails?.prompt_cache_hit_tokens,
+  );
+
+  const cacheWrite = firstPositive(
+    u.cacheWrite,
+    u.cache_write,
+    u.cache_write_tokens,
+    u.cacheWriteTokens,
+    promptDetails?.cache_write_tokens,
+    promptDetails?.cacheWriteTokens,
+    u.created_cache_tokens,
+    u.createdCacheTokens,
+    promptDetails?.created_cache_tokens,
+    promptDetails?.createdCacheTokens,
+    u.cache_creation_input_tokens,
+    promptDetails?.cache_creation_input_tokens,
+    u.prompt_cache_miss_tokens,
+    promptDetails?.prompt_cache_miss_tokens,
+  );
+
   const input = typeof u.input === "number" && Number.isFinite(u.input)
     ? Math.max(0, u.input)
-    : (typeof u.prompt_tokens === "number" && Number.isFinite(u.prompt_tokens)
-      ? Math.max(0, u.prompt_tokens)
-      : (typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens) ? Math.max(0, u.inputTokens) : 0));
-
-  const output = typeof u.output === "number" && Number.isFinite(u.output)
-    ? Math.max(0, u.output)
-    : (typeof u.completion_tokens === "number" && Number.isFinite(u.completion_tokens)
-      ? Math.max(0, u.completion_tokens)
-      : (typeof u.outputTokens === "number" && Number.isFinite(u.outputTokens) ? Math.max(0, u.outputTokens) : 0));
-
-  const reasoning = typeof u.reasoning === "number" && Number.isFinite(u.reasoning)
-    ? Math.max(0, u.reasoning)
-    : (typeof u.reasoning_tokens === "number" && Number.isFinite(u.reasoning_tokens)
-      ? Math.max(0, u.reasoning_tokens)
-      : (typeof u.reasoningTokens === "number" && Number.isFinite(u.reasoningTokens) ? Math.max(0, u.reasoningTokens) : 0));
-
-  const cacheRead = typeof u.cacheRead === "number" && Number.isFinite(u.cacheRead)
-    ? Math.max(0, u.cacheRead)
-    : (typeof u.cache_read === "number" && Number.isFinite(u.cache_read)
-      ? Math.max(0, u.cache_read)
-      : (typeof u.cache_read_input_tokens === "number" && Number.isFinite(u.cache_read_input_tokens)
-        ? Math.max(0, u.cache_read_input_tokens)
-        : (typeof u.prompt_cache_hit_tokens === "number" && Number.isFinite(u.prompt_cache_hit_tokens)
-          ? Math.max(0, u.prompt_cache_hit_tokens)
-          : 0)));
-
-  const cacheWrite = typeof u.cacheWrite === "number" && Number.isFinite(u.cacheWrite)
-    ? Math.max(0, u.cacheWrite)
-    : (typeof u.cache_write === "number" && Number.isFinite(u.cache_write)
-      ? Math.max(0, u.cache_write)
-      : (typeof u.cache_creation_input_tokens === "number" && Number.isFinite(u.cache_creation_input_tokens)
-        ? Math.max(0, u.cache_creation_input_tokens)
-        : (typeof u.prompt_cache_miss_tokens === "number" && Number.isFinite(u.prompt_cache_miss_tokens)
-          ? Math.max(0, u.prompt_cache_miss_tokens)
-          : 0)));
+    : (typeof u.inputTokens === "number" && Number.isFinite(u.inputTokens)
+      ? Math.max(0, u.inputTokens)
+      : (typeof u.input_tokens === "number" && Number.isFinite(u.input_tokens)
+        ? Math.max(0, u.input_tokens)
+        : (typeof u.prompt_tokens === "number" && Number.isFinite(u.prompt_tokens)
+          ? Math.max(0, u.prompt_tokens - cacheRead - cacheWrite)
+          : (typeof u.promptTokens === "number" && Number.isFinite(u.promptTokens)
+            ? Math.max(0, u.promptTokens - cacheRead - cacheWrite)
+            : 0))));
 
   let cost = 0;
   if (typeof rawCost === "number" && Number.isFinite(rawCost)) {
