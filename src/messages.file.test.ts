@@ -384,6 +384,49 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(goalSnapshotTokens).toBe(21920);
   });
 
+  it("extracts token breakdown from vLLM assistant messages with prompt_tokens_details", async () => {
+    const vllmSid = "sess-vllm-tokens-test-uuid";
+    const path = fileFor("vllm-tokens-session.jsonl", [
+      userMsg("u1", "Explain prefix caching", 1755927600000),
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "2026-08-23T00:00:05.000Z",
+        message: {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "Prefix caching reuses KV states across turns." }],
+          provider: "vllm",
+          model: "qwen3.8-27b",
+          usage: {
+            prompt_tokens: 3026,
+            completion_tokens: 10,
+            prompt_tokens_details: {
+              cached_tokens: 1920,
+              created_cache_tokens: 0,
+              multimodal_tokens: null,
+            },
+          },
+          stopReason: "stop",
+          timestamp: 1755927605000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, vllmSid, TEST_DB);
+    expect(out).toHaveLength(2);
+    const asstInfo = out![1].info;
+    expect(asstInfo.tokens).toEqual({
+      input: 1106, // 3026 - 1920 - 0
+      output: 10,
+      reasoning: 0,
+      cache: {
+        read: 1920,
+        write: 0,
+      },
+    });
+  });
+
   it("collates multi-step assistant turns into a single assistant message with ordered parts", async () => {
     const multiStepSid = "sess-multistep-test-uuid";
     const path = fileFor("multistep-session.jsonl", [
