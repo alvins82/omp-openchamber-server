@@ -1,8 +1,37 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
 import { createEventHandler } from "./prompt";
-import { isTodoTool, normalizeOmpTodoStatus, extractTodosFromOmpDetails } from "./todo";
-import type { OmpRpcEvent } from "./rpc";
+import { isTodoTool, normalizeOmpTodoStatus, extractTodosFromOmpDetails } from "./providers/omp/todo";
+import type { OmpRpcEvent } from "./providers/omp/rpc";
+import { createOmpTurnConnection } from "./providers/omp/backend";
+
+/** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
+class FeedingTransport {
+  #handler: ((e: OmpRpcEvent) => void) | undefined;
+  request(_method: string, _params?: unknown): Promise<unknown> {
+    return Promise.resolve();
+  }
+  switchSession(): Promise<unknown> {
+    return Promise.resolve();
+  }
+  onEvent(handler: (e: OmpRpcEvent) => void): () => void {
+    this.#handler = handler;
+    return () => {
+      this.#handler = undefined;
+    };
+  }
+  kill(): void {}
+  feed(event: OmpRpcEvent): void {
+    this.#handler?.(event);
+  }
+}
+
+function wireHandler(onComplete: () => void): FeedingTransport {
+  const transport = new FeedingTransport();
+  const conn = createOmpTurnConnection(transport, { openCodeId: SES_ID, cwd: CWD });
+  conn.onEvent(createEventHandler(SES_ID, undefined, MODEL, onComplete, CWD));
+  return transport;
+}
 
 const SES_ID = "ses_todo_test_session_12345";
 const CWD = "/tmp/test-repo";
@@ -120,14 +149,7 @@ describe("todo.updated SSE event emission during live turns", () => {
   });
 
   it("emits todo.updated when todo tool execution ends with phases details", () => {
-    const handler = createEventHandler(
-      SES_ID,
-      undefined,
-      MODEL,
-      () => {},
-      undefined,
-      CWD,
-    );
+    const transport = wireHandler(() => {});
 
     const phases = [
       {
@@ -140,7 +162,7 @@ describe("todo.updated SSE event emission during live turns", () => {
     ];
 
     // Tool execution start
-    handler({
+    transport.feed({
       type: "tool_execution_start",
       payload: {
         toolCallId: "call_todo_1",
@@ -149,7 +171,7 @@ describe("todo.updated SSE event emission during live turns", () => {
     } as unknown as OmpRpcEvent);
 
     // Tool execution end with phases details
-    handler({
+    transport.feed({
       type: "tool_execution_end",
       payload: {
         toolCallId: "call_todo_1",
@@ -180,14 +202,7 @@ describe("todo.updated SSE event emission during live turns", () => {
   });
 
   it("emits todo.updated when nested message_update toolcall completes", () => {
-    const handler = createEventHandler(
-      SES_ID,
-      undefined,
-      MODEL,
-      () => {},
-      undefined,
-      CWD,
-    );
+    const transport = wireHandler(() => {});
 
     const phases = [
       {
@@ -198,7 +213,7 @@ describe("todo.updated SSE event emission during live turns", () => {
       },
     ];
 
-    handler({
+    transport.feed({
       type: "message_update",
       assistantMessageEvent: {
         type: "toolcall_end",
@@ -216,16 +231,9 @@ describe("todo.updated SSE event emission during live turns", () => {
   });
 
   it("does not emit todo.updated for non-todo tools like bash or read", () => {
-    const handler = createEventHandler(
-      SES_ID,
-      undefined,
-      MODEL,
-      () => {},
-      undefined,
-      CWD,
-    );
+    const transport = wireHandler(() => {});
 
-    handler({
+    transport.feed({
       type: "tool_execution_start",
       payload: {
         toolCallId: "call_bash_1",
@@ -233,7 +241,7 @@ describe("todo.updated SSE event emission during live turns", () => {
       },
     } as unknown as OmpRpcEvent);
 
-    handler({
+    transport.feed({
       type: "tool_execution_end",
       payload: {
         toolCallId: "call_bash_1",

@@ -1,6 +1,16 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { OpenCodeModel, OpenCodeProvider, OpenCodeProvidersResponse } from "../types";
+
+export function getSidecarExtensionPaths(): string[] {
+  const extensionsDir = join(import.meta.dir, "..", "..", "..", "extensions");
+  if (!existsSync(extensionsDir)) return [];
+  return readdirSync(extensionsDir)
+    .filter((f) => f.endsWith(".ts"))
+    .sort()
+    .map((f) => join(extensionsDir, f));
+}
 
 // The embedded RPC instance must start deterministically. Project-level MCP
 // servers discovered from the target cwd (e.g. a flaky LSP server) otherwise
@@ -11,15 +21,7 @@ export function embeddedOmpConfigOverlay(): string {
   const dir = join(tmpdir(), "oc-omp-embedded");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "config.yml");
-  const extensionsDir = join(import.meta.dir, "..", "extensions");
-  const extensionPaths: string[] = [];
-  if (existsSync(extensionsDir)) {
-    const extFiles = ["question.ts", "openchamber_web.ts"];
-    for (const f of extFiles) {
-      const p = join(extensionsDir, f);
-      if (existsSync(p)) extensionPaths.push(p);
-    }
-  }
+  const extensionPaths = getSidecarExtensionPaths();
   const extensionsYaml =
     extensionPaths.length > 0
       ? `\nextensions:\n${extensionPaths.map((p) => `  - ${JSON.stringify(p)}`).join("\n")}\n`
@@ -94,40 +96,19 @@ export interface OmpRpcModel {
   [key: string]: unknown;
 }
 
-export interface OpenCodeModel {
-  id: string;
-  name: string;
-  providerID: string;
-  limit?: { context?: number; output?: number };
-  reasoning?: unknown;
-  tool_call?: boolean;
-  attachment?: boolean;
-  capabilities?: {
-    input?: unknown;
-    output?: unknown;
-    toolcall?: boolean;
-    reasoning?: boolean;
-    attachment?: boolean;
-    temperature?: boolean;
-    [key: string]: unknown;
-  };
-  modalities?: {
-    input?: string[];
-    output?: string[];
-  };
-  variants?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-export interface OpenCodeProvider {
-  id: string;
-  name: string;
-  models: Record<string, OpenCodeModel>;
-}
-
-export interface OpenCodeProvidersResponse {
-  providers: OpenCodeProvider[];
-  default: { default: string };
+/**
+ * Normalizes the omp `get_available_models` response into an OmpRpcModel
+ * list. Accepts a bare array or one of the `{models|data|result}` wrappers.
+ */
+export function normalizeModelsResponse(value: unknown): OmpRpcModel[] {
+  if (Array.isArray(value)) return value as OmpRpcModel[];
+  if (value != null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.models)) return obj.models as OmpRpcModel[];
+    if (Array.isArray(obj.data)) return obj.data as OmpRpcModel[];
+    if (Array.isArray(obj.result)) return obj.result as OmpRpcModel[];
+  }
+  return [];
 }
 
 type PendingRequest = {
@@ -213,16 +194,8 @@ export class OmpRpcConnection {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // detached: the child leads its own process group so kill() can take
       // down MCP/LSP grandchildren instead of orphaning them.
-      const extensionsDir = join(import.meta.dir, "..", "extensions");
-      const extArgs: string[] = [];
-      if (existsSync(extensionsDir)) {
-        for (const f of ["question.ts", "openchamber_web.ts"]) {
-          const p = join(extensionsDir, f);
-          if (existsSync(p)) {
-            extArgs.push("--extension", p);
-          }
-        }
-      }
+      const extPaths = getSidecarExtensionPaths();
+      const extArgs = extPaths.flatMap((p) => ["--extension", p]);
       const proc = Bun.spawn(
         [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...extArgs],
         {

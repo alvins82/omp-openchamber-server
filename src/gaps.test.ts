@@ -19,10 +19,33 @@ import {
   deleteOmpSession,
   updateOmpSession,
   listOmpSessions,
-} from "./sessions";
-import { mapRpcMessagesToOpenCodeRecords, type AgentMessage, type OpenCodeToolPart } from "./messages";
+} from "./providers/omp/store";
+import { mapRpcMessagesToOpenCodeRecords, type AgentMessage } from "./providers/omp/messages";
+import type { OpenCodeToolPart } from "./providers/types";
 import { createEventHandler } from "./prompt";
-import type { OmpRpcEvent } from "./rpc";
+import type { OmpRpcEvent } from "./providers/omp/rpc";
+import { createOmpTurnConnection } from "./providers/omp/backend";
+
+/** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
+class FeedingTransport {
+  #handler: ((e: OmpRpcEvent) => void) | undefined;
+  request(_method: string, _params?: unknown): Promise<unknown> {
+    return Promise.resolve();
+  }
+  switchSession(): Promise<unknown> {
+    return Promise.resolve();
+  }
+  onEvent(handler: (e: OmpRpcEvent) => void): () => void {
+    this.#handler = handler;
+    return () => {
+      this.#handler = undefined;
+    };
+  }
+  kill(): void {}
+  feed(event: OmpRpcEvent): void {
+    this.#handler?.(event);
+  }
+}
 
 const TMP_HOME = mkdtempSync(join(tmpdir(), "oc-gaps-test-"));
 const PROJ_DIR = join(TMP_HOME, "my-project");
@@ -212,16 +235,25 @@ describe("Gap Map Verification Tests (G1 - G8)", () => {
       let completed = false;
       const unsub = subscribeOpenCodeEvents((e) => events.push(e));
 
-      const handler = createEventHandler("ses_test", undefined, { providerID: "omp", modelID: "omp", variant: "default" }, () => {
-        completed = true;
-      });
+      const transport = new FeedingTransport();
+      const conn = createOmpTurnConnection(transport, { openCodeId: "ses_test", cwd: "/tmp/gaps" });
+      conn.onEvent(
+        createEventHandler(
+          "ses_test",
+          undefined,
+          { providerID: "omp", modelID: "omp", variant: "default" },
+          () => {
+            completed = true;
+          },
+        ),
+      );
 
       // Non-terminal agent_end
-      handler({ type: "agent_end", isTerminal: false } as unknown as OmpRpcEvent);
+      transport.feed({ type: "agent_end", isTerminal: false } as unknown as OmpRpcEvent);
       expect(completed).toBe(false);
 
       // Terminal agent_end
-      handler({ type: "agent_end", isTerminal: true } as unknown as OmpRpcEvent);
+      transport.feed({ type: "agent_end", isTerminal: true } as unknown as OmpRpcEvent);
       expect(completed).toBe(true);
 
       unsub();

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import type { OpenCodeEvent } from "./sse";
-import { toOpenCodeSessionId, fromOpenCodeSessionId } from "./sessions";
+import { toOpenCodeSessionId, fromOpenCodeSessionId } from "./providers/omp/store";
 import {
   formatOpenCodeEvent,
   createOpenCodeEventStream,
@@ -16,15 +16,9 @@ import {
 import {
   mapRpcMessagesToOpenCodeRecords,
   type AgentMessage,
-  type OpenCodeToolPart,
-  type OpenCodeTextPart,
-} from "./messages";
-import {
-  mapRpcModelsToOpenCodeProviders,
-  type OmpRpcModel,
-  type OpenCodeProvider,
-  type OpenCodeModel,
-} from "./rpc";
+} from "./providers/omp/messages";
+import { mapRpcModelsToOpenCodeProviders, type OmpRpcModel } from "./providers/omp/rpc";
+import type { OpenCodeModel, OpenCodeProvider, OpenCodeTextPart, OpenCodeToolPart } from "./providers/types";
 
 // ---------------------------------------------------------------------------
 // Session ID round-trip: toOpenCodeSessionId / fromOpenCodeSessionId

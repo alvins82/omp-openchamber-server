@@ -73,6 +73,8 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
       { path: "api/openchamber/models-metadata", method: "GET", expectedStatus: 200 },
       { path: "api/openchamber/update-check", method: "GET", expectedStatus: 200 },
       { path: "api/config/settings", method: "GET", expectedStatus: 200 },
+      { path: "api/config/themes", method: "GET", expectedStatus: 200 },
+      { path: "config/themes", method: "GET", expectedStatus: 200 },
       { path: "api/opencode/upgrade-status", method: "GET", expectedStatus: 200 },
     ];
 
@@ -81,6 +83,16 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
       expect(res.status).toBe(probe.expectedStatus);
       const json = await res.json();
       expect(json).toBeDefined();
+    }
+  });
+
+  test("Sidecar responds to /event, /events, and /global/event SSE endpoints", async () => {
+    for (const p of ["event", "events", "global/event"]) {
+      const controller = new AbortController();
+      const res = await fetch(BASE + p, { signal: controller.signal });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+      controller.abort();
     }
   });
 
@@ -159,6 +171,48 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     const hasResults = flatModelList.length > 0;
     expect(hasResults).toBe(true);
     expect(flatModelList.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("GET /api/small-model allow-list mirrors /config/providers catalog IDs", async () => {
+    const catalogRes = await fetch(BASE + `config/providers?directory=${encodeURIComponent(testDir)}`);
+    expect(catalogRes.status).toBe(200);
+    const catalog = await catalogRes.json() as { providers: Array<{ id: string }> };
+
+    const res = await fetch(BASE + `api/small-model?directory=${encodeURIComponent(testDir)}`);
+    expect(res.status).toBe(200);
+    const data = await res.json() as {
+      available: boolean;
+      model: string | null;
+      authenticatedProviders: string[];
+    };
+
+    // OpenChamber DefaultsSettings + ModelPickerList: the picker only offers
+    // models whose providerID appears in authenticatedProviders, so an empty
+    // or mismatched list renders "No models found".
+    expect(data.available).toBe(false);
+    expect(data.model).toBeNull();
+    expect(Array.isArray(data.authenticatedProviders)).toBe(true);
+
+    const catalogIds: Record<string, true> = {};
+    for (const p of catalog.providers) catalogIds[p.id] = true;
+    const allowList: Record<string, true> = {};
+    for (const id of data.authenticatedProviders) allowList[id] = true;
+
+    expect(Object.keys(allowList).length).toBeGreaterThan(0);
+    // Every allow-listed provider must exist in the catalog (else the picker
+    // filters it out), and every catalog provider must be allow-listed.
+    expect(Object.keys(allowList).sort()).toEqual(Object.keys(catalogIds).sort());
+  });
+
+  test("POST /api/small-model/generate returns 404 so clients use session fallback", async () => {
+    const res = await fetch(BASE + "api/small-model/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "commit message" }),
+    });
+    expect(res.status).toBe(404);
+    const data = await res.json() as { error: string };
+    expect(typeof data.error).toBe("string");
   });
 
   test("User prompt optimistic message ID is preserved without duplication", async () => {

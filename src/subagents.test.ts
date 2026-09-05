@@ -8,10 +8,33 @@ import {
   listOmpSessions,
   toOpenCodeSessionId,
   encodeCwd,
-} from "./sessions";
-import { loadSessionMessages } from "./messages";
+} from "./providers/omp/store";
+import { loadSessionMessages } from "./providers/omp/messages";
 import { createEventHandler, setSubagentStatus, getSessionStatusMap } from "./prompt";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
+import type { OmpRpcEvent } from "./providers/omp/rpc";
+import { createOmpTurnConnection } from "./providers/omp/backend";
+
+/** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
+class FeedingTransport {
+  #handler: ((e: OmpRpcEvent) => void) | undefined;
+  request(_method: string, _params?: unknown): Promise<unknown> {
+    return Promise.resolve();
+  }
+  switchSession(): Promise<unknown> {
+    return Promise.resolve();
+  }
+  onEvent(handler: (e: OmpRpcEvent) => void): () => void {
+    this.#handler = handler;
+    return () => {
+      this.#handler = undefined;
+    };
+  }
+  kill(): void {}
+  feed(event: OmpRpcEvent): void {
+    this.#handler?.(event);
+  }
+}
 
 const TEST_DIR = "/tmp/omp-test-subagents-" + Math.random().toString(36).slice(2);
 const ENCODED_DIR = encodeCwd(TEST_DIR);
@@ -101,17 +124,19 @@ describe("Subagents & Child Sessions Integration", () => {
     const events: OpenCodeEvent[] = [];
     const unsub = subscribeOpenCodeEvents((e) => events.push(e));
 
-    const handler = createEventHandler(
-      "ses_parent123",
-      "msg_u1",
-      { providerID: "omp", modelID: "omp", variant: "default" },
-      () => {},
-      undefined,
-      TEST_DIR,
+    const transport = new FeedingTransport();
+    const conn = createOmpTurnConnection(transport, { openCodeId: "ses_parent123", cwd: TEST_DIR });
+    conn.onEvent(
+      createEventHandler(
+        "ses_parent123",
+        "msg_u1",
+        { providerID: "omp", modelID: "omp", variant: "default" },
+        () => {},
+        TEST_DIR,
+      ),
     );
-
     // 1. Subagent started
-    handler({
+    transport.feed({
       type: "subagent_lifecycle",
       payload: {
         id: "sub-worker-1",
@@ -120,8 +145,7 @@ describe("Subagents & Child Sessions Integration", () => {
         description: "Security Auditor",
         sessionFile: "/tmp/sub-worker-1.jsonl",
       },
-    });
-
+    } as unknown as OmpRpcEvent);
     const createdEvt = events.find((e) => e.type === "session.created");
     expect(createdEvt).toBeDefined();
     const createdSession = (createdEvt?.properties?.info || createdEvt?.properties?.session) as any;
@@ -131,15 +155,14 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(getSessionStatusMap()["ses_subworker1"]).toEqual({ type: "busy" });
 
     // 2. Subagent completed
-    handler({
+    transport.feed({
       type: "subagent_lifecycle",
       payload: {
         id: "sub-worker-1",
         status: "completed",
         agent: "task",
       },
-    });
-
+    } as unknown as OmpRpcEvent);
     const statusIdleEvts = events.filter((e) => e.type === "session.status");
     expect(statusIdleEvts.length).toBeGreaterThan(0);
     expect(getSessionStatusMap()["ses_subworker1"]).toBeUndefined();
@@ -148,7 +171,7 @@ describe("Subagents & Child Sessions Integration", () => {
   });
 
   it("coalesces multi-step assistant turns with subagent tasks and aligns message IDs with streaming", async () => {
-    const { recordUserMessageId } = await import("./messages");
+    const { recordUserMessageId } = await import("./providers/omp/messages");
     const parent = await createOmpSession(TEST_DIR, { title: "Subagent Test" });
     const userMessageId = "msg_client_subagent_prompt";
 

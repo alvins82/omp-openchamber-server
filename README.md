@@ -52,7 +52,7 @@ Open `http://127.0.0.1:3000/` in your browser.
 # Type-check
 bun run check
 
-# Run unit and contract test suite (172 tests)
+# Run unit and contract test suite
 bun test
 
 # Optional: Run live end-to-end suite against real omp binary & active model
@@ -65,5 +65,12 @@ Full architectural specifications, API schemas, and protocol references are in [
 
 - [`architecture.md`](./docs/architecture.md) — Subsystem architecture, process management, JSONL fast path, and core invariants.
 - [`api-reference.md`](./docs/api-reference.md) — Complete OpenCode HTTP and SSE endpoint reference with request/response schemas.
+- [`providers.md`](./docs/providers.md) — Multi-backend adapter contract: `AgentBackend`/`SessionStore` interfaces, session-id codec, model-picker routing, and capability gating.
 - [`omp-protocol.md`](./docs/omp-protocol.md) — oh-my-pi stdio NDJSON RPC protocol, commands, turn events, and disk schemas.
 - [`openchamber-contract.md`](./docs/openchamber-contract.md) — OpenChamber SSE stream lifecycle, message/part schemas, and UI reducer contracts.
+
+The sidecar's backend layer is pluggable (`src/providers/`): omp is the
+default backend, and additional agent backends plug in through the
+`AgentBackend` adapter contract without changing the OpenCode HTTP/SSE
+surface. A fake backend ships for tests — set `OC_FAKE_BACKEND=1` to register
+it (see [`docs/providers.md`](./docs/providers.md)).

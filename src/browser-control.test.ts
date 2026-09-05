@@ -27,7 +27,7 @@ describe("BrowserControlBroker", () => {
     expect(captured).not.toBeNull();
     expect(captured!.requestId).toBe("test-req-1");
     expect(captured!.action).toBe("browser.open");
-    expect(captured!.parameters).toEqual({ url: "http://localhost:3000" });
+    expect(captured!.parameters).toEqual({ viewport: "desktop", url: "http://localhost:3000" });
     expect(broker.pendingCount).toBe(1);
 
     // Claim request
@@ -297,6 +297,41 @@ describe("Browser control broker integration", () => {
 
     broker.resolve("req-file-2", { ok: true });
     await promise;
+  });
+
+  it("passes target directory in broker request and forwards to SSE event properties", async () => {
+    let captured: BrowserControlRequest | null = null;
+    const broker = new BrowserControlBroker({
+      emitRequest: (req) => {
+        captured = req;
+        return emitBrowserControlRequest(req);
+      },
+      createId: () => "req-dir-1",
+    });
+
+    const stream = createOpenCodeEventStream("/Users/alvin/claude-cowork/hangar13", { browserCapable: true, isOpenChamber: true });
+    const reader = stream.getReader();
+    await reader.read(); // stream ready
+
+    const promise = broker.request(
+      "browser.open",
+      { url: "http://localhost:3000" },
+      { baseDir: "/Users/alvin/claude-cowork/hangar13" },
+    );
+
+    expect(captured).not.toBeNull();
+    expect(captured!.directory).toBe("/Users/alvin/claude-cowork/hangar13");
+
+    const frame = await reader.read();
+    expect(frame.done).toBe(false);
+    const frameText = new TextDecoder().decode(frame.value);
+    const parsed = JSON.parse(frameText.replace(/^data:\s*/, "").trim());
+    expect(parsed.properties.directory).toBe("/Users/alvin/claude-cowork/hangar13");
+    expect(parsed.properties.parameters.directory).toBe("/Users/alvin/claude-cowork/hangar13");
+
+    broker.resolve("req-dir-1", { ok: true, data: { opened: true } });
+    await promise;
+    await reader.cancel();
   });
 });
 

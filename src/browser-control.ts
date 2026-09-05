@@ -13,6 +13,7 @@ export interface BrowserControlRequest {
   requestId: string;
   action: string;
   parameters: Record<string, unknown>;
+  directory?: string;
 }
 
 export interface BrowserControlOutcome {
@@ -146,6 +147,7 @@ export class BrowserControlBroker {
       typeof parameters.url === "string"
     ) {
       normalizedParams = {
+        viewport: parameters.viewport ?? "desktop",
         ...parameters,
         url: normalizeBrowserUrlForOpen(
           parameters.url,
@@ -158,6 +160,7 @@ export class BrowserControlBroker {
     const listenerCount = this.emitRequest({
       requestId,
       action,
+      directory: options.baseDir,
       parameters: normalizedParams,
     });
     if (listenerCount === 0) {

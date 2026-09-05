@@ -1,9 +1,4 @@
-export interface OpenCodeTodo {
-  id: string;
-  content: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
-  priority: string;
-}
+import type { OpenCodeTodo } from "../types";
 
 export function isTodoTool(toolName: string | undefined): boolean {
   if (!toolName) return false;

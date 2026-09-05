@@ -1,33 +1,21 @@
 import pino from "pino";
+import pretty from "pino-pretty";
 
 const isDev = process.env.NODE_ENV !== "production";
-const logLevel = process.env.LOG_LEVEL || (isDev ? "debug" : "info");
+const logLevel = process.env.LOG_LEVEL || "info";
 
-export const logger = pino({
-  level: logLevel,
-  transport: isDev
-    ? {
-        target: "pino-pretty",
-        options: {
-          colorize: true,
-          translateTime: "SYS:HH:MM:ss.l",
-          ignore: "pid,hostname",
-          singleLine: true,
-        },
-      }
-    : undefined,
-  hooks: {
-    logMethod(inputArgs, method, level) {
-      if (!process.env.LOG_LEVEL) {
-        if (level === 20 || level >= 50) {
-          return method.apply(this, inputArgs);
-        }
-        return;
-      }
-      return method.apply(this, inputArgs);
-    },
-  },
-});
+const prettyStream = isDev
+  ? pretty({
+      colorize: true,
+      translateTime: "SYS:HH:MM:ss.l",
+      ignore: "pid,hostname",
+      singleLine: true,
+    })
+  : undefined;
+
+export const logger = prettyStream
+  ? pino({ level: logLevel }, prettyStream)
+  : pino({ level: logLevel });
 
 export const httpLogger = logger.child({ module: "http" });
 export const rpcLogger = logger.child({ module: "rpc" });

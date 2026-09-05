@@ -7,51 +7,23 @@ import {
   overlayTitleSlotContent,
   parseTitleSlotLine,
   serializeTitleSlot,
-} from "./title";
+} from "../../title";
 import {
   deleteIndexedTitle,
   deletePersistedMessageIds,
   lookupIndexedTitle,
   recordIndexedTitle,
   searchMatchingSessionIds,
-} from "./title-db";
-import { emitSessionUpdated } from "./sse";
-import { mapOmpUsageToTokens, type TokenBreakdown } from "./messages";
+} from "../../title-db";
+import { emitSessionUpdated } from "../../sse";
+import { mapOmpUsageToTokens } from "./messages";
+import type { OpenCodeSession, TokenBreakdown } from "../types";
 
 function ompSessionsRoot(): string {
   return join(Bun.env.HOME!, ".omp", "agent", "sessions");
 }
 function homePrefix(): string {
   return Bun.env.HOME! + "/";
-}
-
-interface ModelRef {
-  id: string;
-  providerID: string;
-  modelID: string;
-  variant: string;
-}
-
-export interface OpenCodeSession {
-  id: string;
-  slug: string;
-  projectID: string;
-  directory: string;
-  path: string;
-  title?: string;
-  parentID?: string;
-  agent: string;
-  model: ModelRef;
-  version: string;
-  time: { created: number; updated: number; archived?: number };
-  cost: number;
-  tokens: {
-    input: number;
-    output: number;
-    reasoning: number;
-    cache: { read: number; write: number };
-  };
-  metadata?: Record<string, unknown>;
 }
 
 interface SessionHeader {

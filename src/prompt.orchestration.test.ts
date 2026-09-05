@@ -4,12 +4,11 @@ import {
   getSessionStatusMap,
   isSessionBusy,
   promptSessionAsync,
-  resetConnectionFactory,
   shutdownAll,
-  setConnectionFactory,
 } from "./prompt";
+import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcEvent, OmpRpcTransport } from "./rpc";
+import type { OmpRpcEvent, OmpRpcTransport } from "./providers/omp/rpc";
 
 /**
  * Fake OMP transport for orchestration tests. Records every RPC and lets the
@@ -78,11 +77,11 @@ let seq = 0;
 
 afterEach(() => {
   shutdownAll();
-  resetConnectionFactory();
+  resetOmpTransportFactory();
 });
 
 function installFakeFactory() {
-  setConnectionFactory(async (_cwd, sessionPath) => {
+  setOmpTransportFactory(async (_cwd, sessionPath) => {
     const t = new FakeTransport();
     created.push(t);
     await t.switchSession(sessionPath);

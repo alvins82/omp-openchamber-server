@@ -1,7 +1,29 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
 import { createEventHandler } from "./prompt";
-import type { OmpRpcEvent } from "./rpc";
+import type { OmpRpcEvent } from "./providers/omp/rpc";
+import { createOmpTurnConnection } from "./providers/omp/backend";
+
+/** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
+class CapturingTransport {
+  #handler: ((e: OmpRpcEvent) => void) | undefined;
+  request(_method: string, _params?: unknown): Promise<unknown> {
+    return Promise.resolve();
+  }
+  onEvent(handler: (e: OmpRpcEvent) => void): () => void {
+    this.#handler = handler;
+    return () => {
+      this.#handler = undefined;
+    };
+  }
+  switchSession(): Promise<unknown> {
+    return Promise.resolve();
+  }
+  kill(): void {}
+  feed(event: OmpRpcEvent): void {
+    this.#handler?.(event);
+  }
+}
 
 const SES = "ses_testseq0000000000000000000000000";
 
@@ -59,8 +81,11 @@ const MODEL = {
 };
 
 function runTurn(events: OmpRpcEvent[]): number {
-  const h = createEventHandler(SES, undefined as undefined, MODEL, () => { done++; });
-  for (const e of events) h(e);
+  const h = createEventHandler(SES, undefined, MODEL, () => { done++; });
+  const transport = new CapturingTransport();
+  const conn = createOmpTurnConnection(transport, { openCodeId: SES, cwd: "/tmp/contract-seq" });
+  conn.onEvent(h);
+  for (const e of events) transport.feed(e);
   return done;
 }
 

@@ -16,7 +16,33 @@ import {
 } from "./approvals";
 import { createEventHandler } from "./prompt";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcEvent } from "./rpc";
+import type { OmpRpcEvent } from "./providers/omp/rpc";
+import { createOmpTurnConnection } from "./providers/omp/backend";
+
+/** Minimal OmpRpcTransport that captures outgoing frames and lets tests feed raw events. */
+class CapturingTransport {
+  #handler: ((e: OmpRpcEvent) => void) | undefined;
+  constructor(private readonly sentFrames: unknown[]) {}
+  request(_method: string, _params?: unknown): Promise<unknown> {
+    return Promise.resolve();
+  }
+  switchSession(): Promise<unknown> {
+    return Promise.resolve();
+  }
+  onEvent(handler: (e: OmpRpcEvent) => void): () => void {
+    this.#handler = handler;
+    return () => {
+      this.#handler = undefined;
+    };
+  }
+  sendFrame(frame: unknown): void {
+    this.sentFrames.push(frame);
+  }
+  kill(): void {}
+  feed(event: OmpRpcEvent): void {
+    this.#handler?.(event);
+  }
+}
 
 describe("Approval & Question Bridge (Tier 1)", () => {
   beforeEach(() => {
@@ -157,29 +183,25 @@ describe("Approval & Question Bridge (Tier 1)", () => {
 
   describe("extension_ui_request integration with createEventHandler", () => {
     it("bridges confirm UI request to permission.asked event and sends extension_ui_response", () => {
-      const sentFrames: any[] = [];
-      const fakeConn = {
-        request: async () => {},
-        onEvent: () => () => {},
-        switchSession: async () => {},
-        kill: () => {},
-        sendFrame: (frame: any) => sentFrames.push(frame),
-      };
+      const sentFrames: unknown[] = [];
+      const transport = new CapturingTransport(sentFrames);
+      const conn = createOmpTurnConnection(transport, { openCodeId: "ses_event_test", cwd: "/workspace" });
 
       const events: OpenCodeEvent[] = [];
       const unsub = subscribeOpenCodeEvents((e) => events.push(e));
 
-      const handler = createEventHandler(
-        "ses_event_test",
-        undefined,
-        { providerID: "omp", modelID: "omp", variant: "default" },
-        () => {},
-        fakeConn as any,
-        "/workspace",
+      conn.onEvent(
+        createEventHandler(
+          "ses_event_test",
+          undefined,
+          { providerID: "omp", modelID: "omp", variant: "default" },
+          () => {},
+          "/workspace",
+        ),
       );
 
       // OMP child sends extension_ui_request
-      handler({
+      transport.feed({
         type: "extension_ui_request",
         id: "req_confirm_1",
         method: "confirm",
@@ -209,28 +231,24 @@ describe("Approval & Question Bridge (Tier 1)", () => {
     });
 
     it("bridges select UI request to question.asked event and sends extension_ui_response", () => {
-      const sentFrames: any[] = [];
-      const fakeConn = {
-        request: async () => {},
-        onEvent: () => () => {},
-        switchSession: async () => {},
-        kill: () => {},
-        sendFrame: (frame: any) => sentFrames.push(frame),
-      };
+      const sentFrames: unknown[] = [];
+      const transport = new CapturingTransport(sentFrames);
+      const conn = createOmpTurnConnection(transport, { openCodeId: "ses_event_test2", cwd: "/workspace" });
 
       const events: OpenCodeEvent[] = [];
       const unsub = subscribeOpenCodeEvents((e) => events.push(e));
 
-      const handler = createEventHandler(
-        "ses_event_test2",
-        undefined,
-        { providerID: "omp", modelID: "omp", variant: "default" },
-        () => {},
-        fakeConn as any,
-        "/workspace",
+      conn.onEvent(
+        createEventHandler(
+          "ses_event_test2",
+          undefined,
+          { providerID: "omp", modelID: "omp", variant: "default" },
+          () => {},
+          "/workspace",
+        ),
       );
 
-      handler({
+      transport.feed({
         type: "extension_ui_request",
         id: "req_select_1",
         method: "select",

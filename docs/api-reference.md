@@ -263,3 +263,5 @@ data: {"payload":{"id":"evt_03","type":"session.status","properties":{"sessionID
 | `/command` | `GET` | Returns available slash commands. |
 | `/skill` | `GET` | Returns registered agent skills. |
 | `/mcp` | `GET` | Returns MCP server status map (`{}`). |
+| `/api/small-model` | `GET` | Reports resolved small model and callable providers allow-list for OpenChamber. |
+| `/api/small-model/generate` | `POST` | Executes one-shot text generation with the resolved small model (for live turn progress summaries, commit messages, etc.). |

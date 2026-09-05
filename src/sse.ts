@@ -68,7 +68,11 @@ export function emitBrowserControlRequest(request: BrowserControlRequest): numbe
     properties: {
       requestId: request.requestId,
       action: request.action,
-      parameters: request.parameters,
+      directory: request.directory,
+      parameters: {
+        ...request.parameters,
+        ...(request.directory ? { directory: request.directory } : {}),
+      },
     },
   })}\n\n`;
 
@@ -86,13 +90,6 @@ export function emitBrowserControlRequest(request: BrowserControlRequest): numbe
       /* ignore */
     }
   }
-
-  // Also emit through standard OpenCode listener pipeline for completeness
-  emitOpenCodeEvent("openchamber:browser-control-request", {
-    requestId: request.requestId,
-    action: request.action,
-    parameters: request.parameters,
-  });
 
   return delivered;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { reduceToolPartState, type ToolPartState } from "./prompt";
+import { reduceToolPartState } from "./providers/omp/events";
+import type { ToolPartState } from "./providers/types";
 
 describe("reduceToolPartState", () => {
   it("tool_execution_start sets status to running and captures input and time.start", () => {

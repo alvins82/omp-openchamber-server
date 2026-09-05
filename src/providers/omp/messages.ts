@@ -1,90 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { withOmpRpc } from "./rpc";
-import { getOmpSessionByOpenCodeId } from "./sessions";
-import { sessionLogger } from "./logger";
+import { getOmpSessionByOpenCodeId } from "./store";
+import { sessionLogger } from "../../logger";
 import {
   bindPersistedOmpMessageId,
   listPersistedMessageIds,
   recordPersistedMessageId,
-} from "./title-db";
-import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
-import { resolveImageDataUrl, isBlobRef } from "./blobs";
-
-export interface OpenCodeMessageRecord {
-  info: {
-    id: string;
-    role: string;
-    sessionID: string;
-    parentID?: string;
-    agent: string;
-    model: { id?: string; providerID: string; modelID: string; variant: string };
-    providerID?: string;
-    modelID?: string;
-    variant?: string;
-    mode?: string;
-    path?: { cwd: string; root: string };
-    cost?: number;
-    tokens?: {
-      input: number;
-      output: number;
-      reasoning: number;
-      cache: { read: number; write: number };
-    };
-    finish?: string;
-    error?: unknown;
-    time: { created: number; completed?: number };
-  };
-  parts: Array<OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart>;
-}
-
-export interface OpenCodeFilePart {
-  id: string;
-  type: "file";
-  mime?: string;
-  filename?: string;
-  url: string;
-  messageID: string;
-  sessionID: string;
-}
-
-export type OpenCodePart = OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart;
-
-export interface OpenCodeTextPart {
-  id: string;
-  type: "text" | "reasoning";
-  text: string;
-  time?: { start: number; end?: number };
-  messageID: string;
-  sessionID: string;
-}
-
-export interface OpenCodeToolPart {
-  id: string;
-  type: "tool";
-  callID: string;
-  tool: string;
-  state: {
-    status: "pending" | "running" | "completed" | "error";
-    input?: Record<string, unknown>;
-    output?: string;
-    error?: string;
-    time: { start: number; end?: number };
-  };
-  metadata?: { toolCallId?: string };
-  messageID: string;
-  sessionID: string;
-}
-
-export interface TokenBreakdown {
-  input: number;
-  output: number;
-  reasoning: number;
-  cache: {
-    read: number;
-    write: number;
-  };
-}
-
+} from "../../title-db";
+import { normalizeToolInput, normalizeToolOutput } from "../../tool-normalize";
+import { resolveImageDataUrl, isBlobRef } from "../../blobs";
+import type { OpenCodeFilePart, OpenCodeMessageRecord, OpenCodePart, OpenCodeTextPart, OpenCodeToolPart, TokenBreakdown } from "../types";
 export interface UsageMappingResult {
   tokens: TokenBreakdown;
   cost: number;

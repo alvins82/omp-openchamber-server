@@ -6,18 +6,13 @@ import {
   extractPromptImages,
   mimeFromPath,
   promptSessionAsync,
-  setConnectionFactory,
-  resetConnectionFactory,
   removeSessionState,
 } from "./prompt";
-import {
-  loadMessagesFromFile,
-  clearRecordedUserMessagesMemoryCache,
-  type OpenCodeFilePart,
-  type OpenCodeTextPart,
-} from "./messages";
+import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
+import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache } from "./providers/omp/messages";
+import type { OpenCodeFilePart, OpenCodeTextPart } from "./providers/types";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcTransport, OmpRpcEvent } from "./rpc";
+import type { OmpRpcTransport, OmpRpcEvent } from "./providers/omp/rpc";
 
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -180,12 +175,12 @@ describe("promptSessionAsync with image attachments", () => {
   beforeEach(() => {
     clearRecordedUserMessagesMemoryCache();
     mockTransport = new MockPromptTransport();
-    setConnectionFactory(async () => mockTransport);
+    setOmpTransportFactory(async () => mockTransport);
   });
 
   afterEach(() => {
     removeSessionState(testSessionId, testCwd);
-    resetConnectionFactory();
+    resetOmpTransportFactory();
   });
 
   test("passes image attachments to OMP RPC prompt request", async () => {

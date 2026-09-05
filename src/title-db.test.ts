@@ -18,7 +18,7 @@ import {
   setOmpSessionTitle,
   readSessionHeader,
   fromOpenCodeSessionId,
-} from "./sessions";
+} from "./providers/omp/store";
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "oc-title-db-test-"));
 const TEST_DB = join(TEST_DIR, "history.db");

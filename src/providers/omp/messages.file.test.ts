@@ -10,11 +10,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  loadMessagesFromFile,
-  clearRecordedUserMessagesMemoryCache,
-  type OpenCodeTextPart,
-} from "./messages";
+import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache } from "./messages";
+import type { OpenCodeTextPart } from "../types";
 
 const SID = "01234567-89ab-cdef-0123-456789abcdef";
 const TMP = mkdtempSync(join(tmpdir(), "msgfile-test-"));

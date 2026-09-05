@@ -1,13 +1,5 @@
-import {
-  listOmpSessions,
-  listOmpChildSessions,
-  getOmpSessionByOpenCodeId,
-  createOmpSession,
-  deleteOmpSession,
-  updateOmpSession,
-} from "./sessions";
+import { allBackends, backendById, backendForSession, defaultBackend, listProviders, listSessionsAcrossBackends, registerBackend, splitProviderPrefix } from "./providers/registry";
 import { listAvailableCommands, listAvailableSkills } from "./discovery";
-import { loadSessionMessages } from "./messages";
 import {
   createOpenCodeEventStream,
   emitSessionCreated,
@@ -37,20 +29,25 @@ import {
   removeSessionState,
   shutdownAll,
 } from "./prompt";
-import { extractTodosFromOmpDetails } from "./todo";
-import {
-  withOmpRpc,
-  getCurrentModel,
-  mapRpcModelsToOpenCodeProviders,
-  type OmpRpcModel,
-  type OpenCodeProvidersResponse,
-} from "./rpc";
+import { extractTodosFromOmpDetails } from "./providers/omp/todo";
+import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
+import type { OpenCodeProvidersResponse } from "./providers/types";
 import { logger, httpLogger } from "./logger";
 import { join, isAbsolute, basename, extname } from "node:path";
+import { homedir } from "node:os";
 import { readdir, mkdir, stat, unlink, rename } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
+import { fakeBackend } from "./providers/fake/backend";
+import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveProviderConnection, ensureLegacyOmpConfigMigrated } from "./small-model";
+
+// Optional fake backend (test-only): OC_FAKE_BACKEND=1 enables multi-backend
+// mode over the HTTP surface. Off by default so the omp-only path stays
+// byte-identical.
+if (process.env.OC_FAKE_BACKEND === "1") {
+  registerBackend(fakeBackend);
+}
 
 function resolveFsPath(rawPath: string, effectiveDir = process.cwd()): string {
   const home = Bun.env.HOME || process.env.HOME || "/tmp";
@@ -85,27 +82,29 @@ async function fetchProvidersForDirectory(cwd: string): Promise<OpenCodeProvider
   if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
-  const response = await withOmpRpc(cwd, async (conn) => {
-    const rawModels = await conn.request("get_available_models");
-    const models = normalizeModelsResponse(rawModels);
-    const currentModel = await getCurrentModel(conn);
-    return mapRpcModelsToOpenCodeProviders(
-      models,
-      currentModel?.providerID,
-      currentModel?.modelID,
-    );
-  });
+  const response = await listProviders(cwd);
   const entry = { data: response, expiresAt: Date.now() + 120_000 };
   providerCache.set(cwd, entry);
   globalProviderCache = entry;
   return response;
 }
 
-function getOmpConfigFile(): string {
-  const home = Bun.env.HOME || process.env.HOME || "/tmp";
-  const ompDir = join(home, ".omp");
-  mkdirSync(ompDir, { recursive: true });
-  return join(ompDir, "config.json");
+/**
+ * Resolves the owning backend + session for a session-scoped route. Falls
+ * back to a directory-less store lookup to survive cwd key differences.
+ */
+async function resolveSessionRoute(openCodeId: string, dir: string | undefined) {
+  const backend = backendForSession(openCodeId);
+  const session = (await backend.store.get(openCodeId, dir)) || (await backend.store.get(openCodeId));
+  return { backend, session };
+}
+
+function getOpenChamberSettingsFile(): string {
+  const dataDir = Bun.env.OPENCHAMBER_DATA_DIR
+    || process.env.OPENCHAMBER_DATA_DIR
+    || join(homedir(), ".config", "openchamber");
+  mkdirSync(dataDir, { recursive: true });
+  return join(dataDir, "settings.json");
 }
 
 function readOmpConfig(effectiveDir = process.cwd()): Record<string, unknown> {
@@ -124,7 +123,8 @@ function readOmpConfig(effectiveDir = process.cwd()): Record<string, unknown> {
     homeDirectory: home,
   };
   try {
-    const file = getOmpConfigFile();
+    const file = getOpenChamberSettingsFile();
+    ensureLegacyOmpConfigMigrated(file);
     if (existsSync(file)) {
       const parsed = JSON.parse(readFileSync(file, "utf8"));
       if (parsed && typeof parsed === "object") base = { ...base, ...parsed };
@@ -139,10 +139,10 @@ function writeOmpConfig(updates: Record<string, unknown>): Record<string, unknow
   const current = readOmpConfig();
   const merged = { ...current, ...updates };
   try {
-    const file = getOmpConfigFile();
+    const file = getOpenChamberSettingsFile();
     writeFileSync(file, JSON.stringify(merged, null, 2) + "\n");
   } catch (err) {
-    logger.error({ err }, "failed to write config");
+    logger.error({ err }, "failed to write settings");
   }
   return merged;
 }
@@ -187,16 +187,6 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
-function normalizeModelsResponse(value: unknown): OmpRpcModel[] {
-  if (Array.isArray(value)) return value as OmpRpcModel[];
-  if (value != null && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    if (Array.isArray(obj.models)) return obj.models as OmpRpcModel[];
-    if (Array.isArray(obj.data)) return obj.data as OmpRpcModel[];
-    if (Array.isArray(obj.result)) return obj.result as OmpRpcModel[];
-  }
-  return [];
-}
 
 // OC_SIDECAR_PORT overrides the default 4096 so the route-level test suite can
 // run a second instance without colliding with the live sidecar.
@@ -314,16 +304,67 @@ const server = Bun.serve({
 
       // Internal Browser Control Request (used by openchamber_web extension)
       if (path === "/internal/browser-control/request" && req.method === "POST") {
-        const body = (await readJson(req)) as { action?: string; parameters?: Record<string, unknown>; timeoutMs?: number } | undefined;
+        const body = (await readJson(req)) as { action?: string; parameters?: Record<string, unknown>; timeoutMs?: number; directory?: string } | undefined;
         const action = body?.action?.trim() || "";
         if (!action) return jsonError("action is required", 400);
         try {
           const sidecarPort = Number(process.env.OC_SIDECAR_PORT ?? 4096);
+          const targetDir = body?.directory?.trim() || effectiveDir;
           const data = await browserControlBroker.request(action, body?.parameters ?? {}, {
             timeoutMs: body?.timeoutMs,
-            baseDir: effectiveDir,
+            baseDir: targetDir,
             port: sidecarPort,
           });
+
+          // Handle screenshot capture persistence and validation
+          if ((action === "browser.capture" || action === "capture") && data && typeof data === "object") {
+            let captureData = data as { base64?: string; mime?: string; width?: number; height?: number; [key: string]: unknown };
+
+            // If the panel is newly opened or mid-animation, give the UI transition 800ms to paint and retry once
+            if (!captureData.base64 || captureData.width === 0 || captureData.height === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 800));
+              try {
+                const retryResult = await browserControlBroker.request(action, body?.parameters ?? {}, {
+                  timeoutMs: body?.timeoutMs,
+                  baseDir: targetDir,
+                  port: sidecarPort,
+                });
+                if (retryResult && typeof retryResult === "object") {
+                  captureData = retryResult as typeof captureData;
+                }
+              } catch {
+                /* continue to check */
+              }
+            }
+
+            if (!captureData.base64 || captureData.width === 0 || captureData.height === 0) {
+              throw new BrowserControlError(
+                "The in-app browser view is currently hidden or not rendered (captured 0x0 pixels). Please ensure the OpenChamber browser panel is open and visible on screen.",
+                400,
+              );
+            }
+            try {
+              const screenshotsDir = join(targetDir, ".openchamber", "screenshots");
+              await mkdir(screenshotsDir, { recursive: true });
+              const rawLabel = typeof body?.parameters?.label === "string" ? body.parameters.label.trim() : "capture";
+              const cleanLabel = rawLabel.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) || "capture";
+              const ext = captureData.mime?.includes("png") ? "png" : "jpg";
+              const filename = `screenshot-${Date.now()}-${cleanLabel}.${ext}`;
+              const filepath = join(screenshotsDir, filename);
+              const buffer = Buffer.from(captureData.base64, "base64");
+              writeFileSync(filepath, buffer);
+              const enhancedData = {
+                ...captureData,
+                path: filepath,
+                hint: `Screenshot saved to ${filepath}. Write ![](${filepath}) in your response to display it.`,
+              };
+              return json({ ok: true, data: enhancedData });
+            } catch (err: any) {
+              if (err instanceof BrowserControlError) throw err;
+              logger.warn(`Failed to save screenshot to disk: ${err?.message || err}`);
+            }
+          }
+
           return json({ ok: true, data });
         } catch (err) {
           const status = err instanceof BrowserControlError ? err.status : 500;
@@ -860,6 +901,7 @@ const MIME_TYPES: Record<string, string> = {
 
       // SSE
       if (
+        p === "/event" ||
         p === "/events" ||
         p === "/global/event" ||
         p === "/openchamber/events"
@@ -879,8 +921,14 @@ const MIME_TYPES: Record<string, string> = {
       // Create session (POST /session)
       if (p === "/session" && req.method === "POST") {
         try {
-          const body = (await readJson(req)) as { title?: string; parentID?: string } | undefined;
-          const session = await createOmpSession(dir, body);
+          const body = (await readJson(req)) as
+            | { title?: string; parentID?: string; model?: { providerID?: string } }
+            | undefined;
+          // D1: a namespaced model prefix selects the backend for the new
+          // session; absent or unknown prefix falls through to the default.
+          const prefix = splitProviderPrefix(body?.model?.providerID ?? "");
+          const backend = (prefix.backendId ? backendById(prefix.backendId) : undefined) ?? defaultBackend();
+          const session = await backend.store.create(dir, body);
           emitSessionCreated(session as unknown as Record<string, unknown>, session.directory);
           return json(session, { status: 201 });
         } catch (err) {
@@ -897,7 +945,7 @@ const MIME_TYPES: Record<string, string> = {
           const limit = url.searchParams.get("limit");
           const search = url.searchParams.get("search") || url.searchParams.get("query") || url.searchParams.get("q") || undefined;
           const all = roots || url.searchParams.get("all") === "true" || !dir;
-          const sessions = await listOmpSessions(all ? null : dir, {
+          const sessions = await listSessionsAcrossBackends(all ? null : dir, {
             all,
             archived,
             limit: limit != null ? parseInt(limit, 10) : undefined,
@@ -918,7 +966,7 @@ const MIME_TYPES: Record<string, string> = {
           const limit = url.searchParams.get("limit");
           const search = url.searchParams.get("search") || url.searchParams.get("query") || url.searchParams.get("q") || undefined;
           const all = roots || url.searchParams.get("all") === "true";
-          const sessions = await listOmpSessions(all ? null : dir, {
+          const sessions = await listSessionsAcrossBackends(all ? null : dir, {
             all,
             archived,
             limit: limit != null ? parseInt(limit, 10) : undefined,
@@ -941,7 +989,7 @@ const MIME_TYPES: Record<string, string> = {
         const openCodeId = sMatch[1];
         if (req.method === "GET") {
           try {
-            const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+            const { session } = await resolveSessionRoute(openCodeId, dir);
             if (!session) return jsonError("session not found", 404);
             return json(session);
         } catch (err) {
@@ -951,9 +999,9 @@ const MIME_TYPES: Record<string, string> = {
 
       if (req.method === "DELETE") {
         try {
-          const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+          const { backend, session } = await resolveSessionRoute(openCodeId, dir);
           if (!session) return jsonError("session not found", 404);
-          const ok = await deleteOmpSession(openCodeId, dir);
+          const ok = await backend.store.delete(openCodeId, dir);
           removeSessionState(openCodeId, session.directory);
           emitSessionDeleted(openCodeId);
           return json(ok);
@@ -969,7 +1017,8 @@ const MIME_TYPES: Record<string, string> = {
             metadata?: Record<string, unknown>;
             time?: { archived?: number | null };
           } | undefined;
-          const updated = await updateOmpSession(
+          const { backend } = await resolveSessionRoute(openCodeId, dir);
+          const updated = await backend.store.update(
             openCodeId,
             { title: body?.title, metadata: body?.metadata, time: body?.time },
             dir,
@@ -1041,8 +1090,9 @@ const MIME_TYPES: Record<string, string> = {
     const todoMatch = p.match(/^\/session\/([^/]+)\/todo$/);
     if (todoMatch && req.method === "GET") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(todoMatch[1], dir)) || (await getOmpSessionByOpenCodeId(todoMatch[1]));
+        const { backend, session } = await resolveSessionRoute(todoMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
+        if (!backend.capabilities.todo) return json([]);
         const todos = await withOmpRpc(session.directory, async (conn) => {
           const raw = (await conn.request("get_state", {})) as Record<string, unknown>;
           return extractTodosFromOmpDetails({ todoPhases: raw?.todoPhases }) ?? [];
@@ -1057,7 +1107,7 @@ const MIME_TYPES: Record<string, string> = {
     const childrenMatch = p.match(/^\/session\/([^/]+)\/children$/);
     if (childrenMatch && req.method === "GET") {
       try {
-        const children = await listOmpChildSessions(childrenMatch[1], dir);
+        const children = await backendForSession(childrenMatch[1]).store.children(childrenMatch[1], dir);
         return json(children);
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "children failed", 500);
@@ -1068,9 +1118,9 @@ const MIME_TYPES: Record<string, string> = {
     const forkMatch = p.match(/^\/session\/([^/]+)\/fork$/);
     if (forkMatch && req.method === "POST") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(forkMatch[1], dir)) || (await getOmpSessionByOpenCodeId(forkMatch[1]));
+        const { backend, session } = await resolveSessionRoute(forkMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
-        const forked = await createOmpSession(session.directory, {
+        const forked = await backend.store.create(session.directory, {
           parentID: forkMatch[1],
           title: `Fork of ${session.title ?? session.id}`,
         });
@@ -1085,8 +1135,9 @@ const MIME_TYPES: Record<string, string> = {
     const summarizeMatch = p.match(/^\/session\/([^/]+)\/summarize$/);
     if (summarizeMatch && req.method === "POST") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(summarizeMatch[1], dir)) || (await getOmpSessionByOpenCodeId(summarizeMatch[1]));
+        const { backend, session } = await resolveSessionRoute(summarizeMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
+        if (!backend.capabilities.compact) return jsonError("summarize not supported by backend", 501);
         await withOmpRpc(session.directory, async (conn) => {
           await conn.request("compact", {});
         }).catch(() => {});
@@ -1100,7 +1151,7 @@ const MIME_TYPES: Record<string, string> = {
     const revertMatch = p.match(/^\/session\/([^/]+)\/(revert|unrevert)$/);
     if (revertMatch && req.method === "POST") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(revertMatch[1], dir)) || (await getOmpSessionByOpenCodeId(revertMatch[1]));
+        const { session } = await resolveSessionRoute(revertMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
         return json(session);
       } catch (err) {
@@ -1114,7 +1165,7 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const openCodeId = cmdMatch[1];
         const body = (await readJson(req)) as { command?: string; arguments?: string } | undefined;
-        const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+        const { session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
         const commandText = `/${body?.command ?? ""}${body?.arguments ? ` ${body.arguments}` : ""}`.trim();
         const result = await promptSessionAsync(openCodeId, session.directory, session.path, {
@@ -1132,9 +1183,10 @@ const MIME_TYPES: Record<string, string> = {
     if (shellMatch && req.method === "POST") {
       try {
         const openCodeId = shellMatch[1];
-        const body = (await readJson(req)) as { command?: string } | undefined;
-        const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+        const { backend, session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
+        if (!backend.capabilities.shell) return jsonError("shell not supported by backend", 400);
+        const body = (await readJson(req)) as { command?: string } | undefined;
         const output = await withOmpRpc(session.directory, async (conn) => {
           return await conn.request("bash", { command: body?.command ?? "" });
         }).catch((err) => String(err));
@@ -1151,9 +1203,10 @@ const MIME_TYPES: Record<string, string> = {
     const msgMatch = p.match(/^\/session\/([^/]+)\/message$/);
     if (msgMatch && req.method === "GET") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(msgMatch[1], dir)) || (await getOmpSessionByOpenCodeId(msgMatch[1]));
+        const { backend, session } = await resolveSessionRoute(msgMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
-        const messages = await loadSessionMessages(msgMatch[1], session.directory);
+        const messages = await backend.store.transcript(msgMatch[1], session.directory);
+        if (messages == null) return jsonError("load failed", 500);
         return json(messages);
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "load failed", 500);
@@ -1166,7 +1219,7 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const openCodeId = promptAsyncMatch[1];
         const body = await readJson(req);
-        const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+        const { session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
         const result = await promptSessionAsync(openCodeId, session.directory, session.path, body);
         if (result.queued) return json({ queued: true });
@@ -1181,7 +1234,7 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const openCodeId = msgMatch[1];
         const body = await readJson(req);
-        const session = (await getOmpSessionByOpenCodeId(openCodeId, dir)) || (await getOmpSessionByOpenCodeId(openCodeId));
+        const { session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
         const result = await promptSessionAsync(openCodeId, session.directory, session.path, body);
         if (result.queued) return json({ queued: true });
@@ -1195,7 +1248,7 @@ const MIME_TYPES: Record<string, string> = {
     const abortMatch = p.match(/^\/session\/([^/]+)\/abort$/);
     if (abortMatch && req.method === "POST") {
       try {
-        const session = (await getOmpSessionByOpenCodeId(abortMatch[1], dir)) || (await getOmpSessionByOpenCodeId(abortMatch[1]));
+        const { session } = await resolveSessionRoute(abortMatch[1], dir);
         const ok = session ? await abortSession(abortMatch[1], session.directory) : false;
         return json(ok);
       } catch (err) {
@@ -1514,10 +1567,71 @@ const MIME_TYPES: Record<string, string> = {
       return json({ success: true });
     }
 
-    // Small model distillation & summaries
-    if (path === "/api/small-model" || path === "/api/small-model/generate") {
-      if (req.method === "GET") return json({ available: false, model: null });
-      return json({ text: "", success: false });
+    // Small model: OpenChamber's override picker filters the provider catalog
+    // (served at /config/providers) by this allow-list, so the IDs must be the
+    // same OpenCode-mapped IDs.
+    if (path === "/api/small-model") {
+      if (req.method !== "GET") return jsonError("method not allowed", 405);
+      try {
+        const providersData = await fetchProvidersForDirectory(effectiveDir);
+        const seen: Record<string, true> = {};
+        const authenticatedProviders: string[] = [];
+        for (const pr of providersData.providers) {
+          if (seen[pr.id]) continue;
+          seen[pr.id] = true;
+          authenticatedProviders.push(pr.id);
+        }
+        const preferredProviderID = url.searchParams.get("providerID") ?? undefined;
+        const preferredModelID = url.searchParams.get("modelID") ?? undefined;
+        const resolved = await describeSmallModel({
+          directory: effectiveDir,
+          preferredProviderID,
+          preferredModelID,
+        });
+        return json({
+          available: Boolean(resolved && resolved.hasLogin),
+          model: resolved,
+          authenticatedProviders,
+        });
+      } catch (err) {
+        logger.warn(
+          `[sidecar] small-model providers unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return json({ available: false, model: null, authenticatedProviders: [] });
+      }
+    }
+    if (path === "/api/small-model/generate") {
+      if (req.method !== "POST") return jsonError("method not allowed", 405);
+      const body = (await readJson(req)) as Record<string, unknown> | undefined;
+      const {
+        prompt,
+        system,
+        maxOutputTokens,
+        model,
+        directory,
+        preferredProviderID,
+        preferredModelID,
+      } = body || {};
+
+      try {
+        const result = await generateSmallModelText({
+          prompt: typeof prompt === "string" ? prompt : "",
+          system: typeof system === "string" ? system : undefined,
+          maxOutputTokens: typeof maxOutputTokens === "number" ? maxOutputTokens : undefined,
+          model: typeof model === "string" ? model : undefined,
+          directory: typeof directory === "string" ? directory : effectiveDir,
+          preferredProviderID: typeof preferredProviderID === "string" ? preferredProviderID : undefined,
+          preferredModelID: typeof preferredModelID === "string" ? preferredModelID : undefined,
+        });
+        return json(result);
+      } catch (err: unknown) {
+        const statusCode = (err as { statusCode?: number })?.statusCode || 500;
+        const msg = err instanceof Error ? err.message : "Small model generation failed";
+        if (statusCode >= 500) {
+          logger.error({ err, path }, `[small-model] generation failed: ${msg}`);
+        }
+        return jsonError(msg, statusCode);
+      }
     }
 
     // Agent memory
@@ -1562,37 +1676,40 @@ const MIME_TYPES: Record<string, string> = {
     }
 
     // Markdown image grants
-    if (path === "/api/markdown-image-grants") {
+    if (p === "/markdown-image-grants" || path === "/api/markdown-image-grants") {
       return json([]);
     }
 
     // OpenChamber themes & snippets & catalog
-    if (p === "/api/config/themes" && req.method === "GET") {
+    if ((p === "/config/themes" || p === "/api/config/themes") && req.method === "GET") {
       return json({ themes: [], currentTheme: "dark" });
     }
 
-    if ((p === "/api/config/snippets" || p.startsWith("/api/config/snippets/")) && req.method === "GET") {
+    if (
+      (p === "/config/snippets" || p.startsWith("/config/snippets/") || p === "/api/config/snippets" || p.startsWith("/api/config/snippets/")) &&
+      req.method === "GET"
+    ) {
       return json([]);
     }
 
-    if (p.startsWith("/api/config/skills/catalog") && req.method === "GET") {
+    if ((p.startsWith("/config/skills/catalog") || p.startsWith("/api/config/skills/catalog")) && req.method === "GET") {
       return json({ skills: [] });
     }
 
-    if (p.startsWith("/api/config/mcp") && req.method === "GET") {
+    if ((p.startsWith("/config/mcp") || p.startsWith("/api/config/mcp")) && req.method === "GET") {
       return json({});
     }
 
-    if (p.startsWith("/api/quota/") && req.method === "GET") {
-      const providerId = p.replace(/^\/api\/quota\//, "");
+    if ((p.startsWith("/quota/") || p.startsWith("/api/quota/")) && req.method === "GET") {
+      const providerId = p.replace(/^\/(?:api\/)?quota\//, "");
       return json({ providerId, limit: null, used: 0 });
     }
 
-    if (p === "/api/github/auth/status" && req.method === "GET") {
+    if ((p === "/github/auth/status" || p === "/api/github/auth/status") && req.method === "GET") {
       return json({ authenticated: false });
     }
 
-    if (p === "/api/session-folders" && req.method === "GET") {
+    if ((p === "/session-folders" || p === "/api/session-folders") && req.method === "GET") {
       return json([]);
     }
 
@@ -1629,7 +1746,32 @@ const MIME_TYPES: Record<string, string> = {
   },
 });
 
-logger.info({ port: server.port }, `[proxy] listening on http://127.0.0.1:${server.port}`);
+function logStartupBanner(port?: number): void {
+  const effectivePort = port ?? 4096;
+  const backendList = allBackends()
+    .map((b) => `${b.id}${b.id === defaultBackend().id ? " (default)" : ""}`)
+    .join(", ");
+  const extPaths = getSidecarExtensionPaths();
+  const extensions = extPaths.length > 0 ? extPaths.map((p) => basename(p)).join(", ") : "none";
+  const smallModel = resolveSmallModel();
+  let smallModelInfo = "none configured";
+  if (smallModel) {
+    const conn = resolveProviderConnection(smallModel.providerID);
+    const authStatus = conn?.apiKey ? "authenticated" : conn?.baseURL ? "endpoint ready" : "no credentials found";
+    smallModelInfo = `${smallModel.providerID}/${smallModel.modelID} (source: ${smallModel.source}, endpoint: ${conn?.baseURL || "unknown"}, status: ${authStatus})`;
+  }
+
+  logger.info(`[sidecar] 🚀 OMP Sidecar started successfully`);
+  logger.info(`[sidecar] Listening on http://127.0.0.1:${effectivePort}`);
+  logger.info(`[sidecar] Configuration:`);
+  logger.info(`  • Working directory : ${process.cwd()}`);
+  logger.info(`  • Active adapters   : ${backendList}`);
+  logger.info(`  • Small model       : ${smallModelInfo}`);
+  logger.info(`  • Extensions        : ${extensions}`);
+  logger.info(`  • Browser control   : ready`);
+}
+
+logStartupBanner(server.port);
 
 // Keepalive interval so Bun's event loop wakes up frequently to process POSIX signals
 // (SIGINT/SIGTERM) immediately even when Bun.serve has no pending I/O.
@@ -1649,6 +1791,9 @@ function handleShutdownSignal(signal: string) {
       process.stdin.setRawMode(false);
     }
     process.stdin.pause();
+    if (typeof process.stdin.unref === "function") {
+      process.stdin.unref();
+    }
   } catch {
     // ignore
   }
@@ -1659,6 +1804,9 @@ function handleShutdownSignal(signal: string) {
   }
   try {
     logger.info({ signal }, `[proxy] ${signal} received, shutting down`);
+    if (typeof (logger as any).flush === "function") {
+      (logger as any).flush();
+    }
   } catch {
     // ignore
   }
@@ -1675,6 +1823,18 @@ function handleShutdownSignal(signal: string) {
   }
   process.exit(0);
 }
+
+// Restore terminal raw mode on process exit to avoid leaving user shell in corrupted state
+process.on("exit", () => {
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(false);
+    }
+  } catch {
+    // ignore
+  }
+});
+
 process.on("SIGTERM", () => handleShutdownSignal("SIGTERM"));
 process.on("SIGINT", () => handleShutdownSignal("SIGINT"));
 process.on("SIGTSTP", () => handleShutdownSignal("SIGTSTP"));

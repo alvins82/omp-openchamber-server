@@ -31,7 +31,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, w
 import { basename, join } from "node:path";
 import type { Subprocess } from "bun";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { embeddedOmpConfigOverlay } from "./rpc";
+import { embeddedOmpConfigOverlay } from "./providers/omp/rpc";
 
 const LIVE = process.env.OC_LIVE === "1";
 const lt = (name: string, fn: () => Promise<void>, timeout?: number) =>

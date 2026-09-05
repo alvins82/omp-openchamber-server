@@ -30,7 +30,7 @@ export default function openchamberWebExtension(pi: any) {
     loadMode: "essential",
     approval: "read",
     parameters: OpenChamberWebSchema,
-    async execute(_id: string, params: any, signal: any) {
+    async execute(_id: string, params: any, signal: any, _onUpdate: any, ctx: any) {
       if (signal?.aborted) {
         return { isError: true, content: [{ type: "text", text: "Cancelled" }] };
       }
@@ -38,6 +38,7 @@ export default function openchamberWebExtension(pi: any) {
       const port = process.env.OC_SIDECAR_PORT || "4096";
       const rawAction = typeof params.action === "string" ? params.action.trim() : "";
       const action = rawAction.startsWith("browser.") ? rawAction : `browser.${rawAction}`;
+      const directory = ctx?.cwd || process.cwd();
 
       const explicitParams = params.parameters && typeof params.parameters === "object" ? params.parameters : {};
       const flattenedParams: Record<string, unknown> = {};
@@ -53,7 +54,7 @@ export default function openchamberWebExtension(pi: any) {
         const response = await fetch(`http://127.0.0.1:${port}/internal/browser-control/request`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, parameters: mergedParams }),
+          body: JSON.stringify({ action, directory, parameters: mergedParams }),
           signal,
         });
 
