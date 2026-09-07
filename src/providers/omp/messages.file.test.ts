@@ -28,9 +28,9 @@ const userMsg = (id: string, text: string, ts = 1755927600000) => ({
   message: { id, role: "user", content: text, timestamp: ts },
 });
 
-const asstMsg = (id: string, content: unknown[], ts = 1755927605000) => ({
+const asstMsg = (id: string, content: unknown[], ts = 1755927605000, stopReason = "stop") => ({
   type: "message", id, timestamp: new Date(ts).toISOString(),
-  message: { id, role: "assistant", content, provider: "sidevllm", model: "qwen", stopReason: "stop", timestamp: ts },
+  message: { id, role: "assistant", content, provider: "sidevllm", model: "qwen", stopReason, timestamp: ts },
 });
 
 describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
@@ -109,6 +109,35 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(part.metadata?.toolCallId).toBe("call_1");
     expect(part.state.status).toBe("completed");
     expect(part.state.output).toBe("a.txt");
+  });
+
+  it("leaves an unresolved tool call unfinished", async () => {
+    const path = fileFor("tool-pending.jsonl", [
+      asstMsg("m_pending", [
+        { type: "toolCall", id: "call_pending", name: "bash", arguments: { command: "ls" } },
+      ], 1755927605000, "toolUse"),
+    ]);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    expect(out).toHaveLength(1);
+    expect(out![0].info.time.completed).toBeUndefined();
+    const part = out![0].parts[0] as { state: { status: string } };
+    expect(part.state.status).toBe("pending");
+  });
+
+  it("does not complete a multi-tool message after only the first result", async () => {
+    const path = fileFor("tool-parallel.jsonl", [
+      asstMsg("m_parallel", [
+        { type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } },
+        { type: "toolCall", id: "call_2", name: "read", arguments: { path: "a.txt" } },
+      ], 1755927605000, "toolUse"),
+      { type: "message", id: "m_result", timestamp: "2026-08-23T01:00:06.000Z",
+        message: { role: "toolResult", toolCallId: "call_1", toolName: "bash", content: "a.txt", timestamp: 1755927606000 } },
+    ]);
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    expect(out).toHaveLength(1);
+    expect(out![0].info.time.completed).toBeUndefined();
+    const states = out![0].parts.map((part) => (part as { state: { status: string } }).state.status);
+    expect(states).toEqual(["completed", "pending"]);
   });
 
   it("maps an isError tool result to an error part state", async () => {
@@ -748,4 +777,3 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect((out![1].parts[4] as any).text).toBe("Goal complete: application built and verified.");
   });
 });
-

@@ -310,6 +310,17 @@ function mergeToolResultIntoAssistant(
   return true;
 }
 
+function updateAssistantCompletion(record: OpenCodeMessageRecord, completedAt: number): void {
+  const hasActiveTool = record.parts.some(
+    (part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"),
+  );
+  if (hasActiveTool) {
+    delete record.info.time.completed;
+    return;
+  }
+  record.info.time.completed = completedAt;
+}
+
 function buildParts(
   msg: AgentMessage,
   openCodeId: string,
@@ -538,7 +549,7 @@ export function mapRpcMessagesToOpenCodeRecords(
 
     if (msg.role === "toolResult" && lastAssistantRecord) {
       if (mergeToolResultIntoAssistant(msg, lastAssistantRecord, createdAt)) {
-        lastAssistantRecord.info.time.completed = createdAt;
+        updateAssistantCompletion(lastAssistantRecord, createdAt);
         continue;
       }
     }
@@ -633,7 +644,7 @@ export function mapRpcMessagesToOpenCodeRecords(
       if (lastAssistantRecord) {
         const parts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
         lastAssistantRecord.parts.push(...parts);
-        lastAssistantRecord.info.time.completed = createdAt;
+        updateAssistantCompletion(lastAssistantRecord, createdAt);
         if (finish) {
           lastAssistantRecord.info.finish = finish;
         } else if (lastAssistantRecord.parts.some((p) => p.type === "tool" && (p.state.status === "pending" || p.state.status === "running"))) {
@@ -697,10 +708,11 @@ export function mapRpcMessagesToOpenCodeRecords(
             mode: "primary",
             cost,
             tokens,
-            time: { created: createdAt, completed: createdAt },
+            time: { created: createdAt },
           },
           parts,
         };
+        updateAssistantCompletion(record, createdAt);
         records.push(record);
         lastAssistantRecord = record;
       }
