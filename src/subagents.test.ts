@@ -18,7 +18,10 @@ import { createOmpTurnConnection } from "./providers/omp/backend";
 /** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
 class FeedingTransport {
   #handler: ((e: OmpRpcEvent) => void) | undefined;
-  request(_method: string, _params?: unknown): Promise<unknown> {
+  subagents: Array<{ id: string; status: string }> = [];
+
+  request(method: string, _params?: unknown): Promise<unknown> {
+    if (method === "get_subagents") return Promise.resolve({ subagents: this.subagents });
     return Promise.resolve();
   }
   switchSession(): Promise<unknown> {
@@ -168,6 +171,16 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(getSessionStatusMap()["ses_subworker1"]).toBeUndefined();
 
     unsub();
+  });
+
+  it("reads the backend subagent snapshot and converts ids to OpenCode ids", async () => {
+    const transport = new FeedingTransport();
+    transport.subagents = [{ id: "019ef37d-f6e3-7006-88ad-5025bade750d", status: "running" }];
+    const conn = createOmpTurnConnection(transport, { openCodeId: "ses_parent123", cwd: TEST_DIR });
+
+    expect(await conn.getSubagentStatuses?.()).toEqual([
+      { id: toOpenCodeSessionId("019ef37d-f6e3-7006-88ad-5025bade750d"), status: "running" },
+    ]);
   });
 
   it("coalesces multi-step assistant turns with subagent tasks and aligns message IDs with streaming", async () => {

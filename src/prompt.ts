@@ -1,5 +1,13 @@
 import { allBackends, backendById, backendForSession, nativeProviderID, splitProviderPrefix } from "./providers/registry";
-import type { ImageContent, ModelRef, ToolPartState, TokenBreakdown, BackendTurnConnection, NormalizedTurnEvent } from "./providers/types";
+import type {
+  BackendSubagentSnapshot,
+  BackendTurnConnection,
+  ImageContent,
+  ModelRef,
+  NormalizedTurnEvent,
+  ToolPartState,
+  TokenBreakdown,
+} from "./providers/types";
 import { promptLogger } from "./logger";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
 import {
@@ -62,9 +70,29 @@ function sessionKey(openCodeId: string, cwd: string): string {
 const sessionStates = new Map<string, SessionState>();
 const sessionBusyLocks = new Set<string>();
 
+interface SubagentStatusScope {
+  key: string;
+  directory: string;
+}
+
+interface StoredSubagentStatus {
+  status: { type: string };
+  scopeKey?: string;
+  directory?: string;
+}
+
+const subagentStatusMap = new Map<string, StoredSubagentStatus>();
+
+function clearSubagentStatuses(scopeKey: string): void {
+  for (const [childOpenCodeId, entry] of subagentStatusMap) {
+    if (entry.scopeKey === scopeKey) subagentStatusMap.delete(childOpenCodeId);
+  }
+}
+
 export function removeSessionState(openCodeId: string, cwd: string): void {
   clearSessionApprovals(openCodeId);
   const key = sessionKey(openCodeId, cwd);
+  clearSubagentStatuses(key);
   const state = sessionStates.get(key);
   if (state) {
     state.unsubscribe();
@@ -378,6 +406,7 @@ export function createEventHandler(
   onComplete: () => void,
   cwd?: string,
 ): (event: NormalizedTurnEvent) => void {
+  const subagentScope = cwd === undefined ? undefined : { key: sessionKey(openCodeId, cwd), directory: cwd };
   let assistantMessageID: string | undefined;
   let assistantStartTime: number | undefined;
   let currentPartType: "text" | "reasoning" | undefined;
@@ -519,7 +548,7 @@ export function createEventHandler(
       }
       case "subagent_started": {
         const childOpenCodeId = event.childId;
-        setSubagentStatus(childOpenCodeId, { type: "busy" });
+        setSubagentStatus(childOpenCodeId, { type: "busy" }, subagentScope);
         emitSessionCreated({
           id: childOpenCodeId,
           slug: childOpenCodeId,
@@ -539,7 +568,7 @@ export function createEventHandler(
         return;
       }
       case "subagent_ended": {
-        setSubagentStatus(event.childId, undefined);
+        setSubagentStatus(event.childId, undefined, subagentScope);
         emitSessionStatus(event.childId, { type: "idle" }, cwd);
         emitSessionUpdated({
           id: event.childId,
@@ -550,10 +579,10 @@ export function createEventHandler(
       }
       case "subagent_status": {
         if (event.status === "busy") {
-          setSubagentStatus(event.childId, { type: "busy" });
+          setSubagentStatus(event.childId, { type: "busy" }, subagentScope);
           emitSessionStatus(event.childId, { type: "busy" }, cwd);
         } else {
-          setSubagentStatus(event.childId, undefined);
+          setSubagentStatus(event.childId, undefined, subagentScope);
           emitSessionStatus(event.childId, { type: "idle" }, cwd);
         }
         return;
@@ -883,6 +912,7 @@ export async function abortSession(openCodeId: string, cwd: string): Promise<boo
     } catch (err) {
       promptLogger.error({ err, sessionID: openCodeId }, `[abort] ${openCodeId} RPC abort failed`);
       state.conn.kill();
+      clearSubagentStatuses(key);
       sessionStates.delete(key);
     }
     state.unsubscribe();
@@ -899,25 +929,66 @@ export function isSessionBusy(openCodeId: string, cwd: string): boolean {
   return sessionStates.get(sessionKey(openCodeId, cwd))?.busy ?? false;
 }
 
-const subagentStatusMap = new Map<string, { type: string }>();
-
-export function setSubagentStatus(childOpenCodeId: string, status?: { type: string }): void {
+export function setSubagentStatus(
+  childOpenCodeId: string,
+  status?: { type: string },
+  scope?: SubagentStatusScope,
+): void {
   if (!status) {
     subagentStatusMap.delete(childOpenCodeId);
   } else {
-    subagentStatusMap.set(childOpenCodeId, status);
+    subagentStatusMap.set(childOpenCodeId, {
+      status,
+      scopeKey: scope?.key,
+      directory: scope?.directory,
+    });
   }
 }
 
-export function getSessionStatusMap(): Record<string, { type: string }> {
+export function getSessionStatusMap(directory?: string): Record<string, { type: string }> {
   const result: Record<string, { type: string }> = {};
   for (const state of sessionStates.values()) {
+    if (directory !== undefined && state.cwd !== directory) continue;
     if (state.busy) result[state.openCodeId] = { type: "busy" };
   }
-  for (const [id, status] of subagentStatusMap) {
-    result[id] = status;
+  for (const [id, entry] of subagentStatusMap) {
+    if (directory !== undefined && entry.directory !== directory) continue;
+    result[id] = entry.status;
   }
   return result;
+}
+
+function isActiveSubagentStatus(snapshot: BackendSubagentSnapshot): boolean {
+  return snapshot.status === "pending" || snapshot.status === "running";
+}
+
+async function reconcileStateSubagents(state: SessionState): Promise<void> {
+  if (!state.conn.getSubagentStatuses) return;
+
+  let snapshots: BackendSubagentSnapshot[];
+  try {
+    snapshots = await state.conn.getSubagentStatuses();
+  } catch {
+    return;
+  }
+
+  const scope = { key: sessionKey(state.openCodeId, state.cwd), directory: state.cwd };
+  const activeIds = new Set<string>();
+  for (const snapshot of snapshots) {
+    if (!isActiveSubagentStatus(snapshot)) continue;
+    activeIds.add(snapshot.id);
+    setSubagentStatus(snapshot.id, { type: "busy" }, scope);
+  }
+  for (const [childOpenCodeId, entry] of subagentStatusMap) {
+    if (entry.scopeKey === scope.key && !activeIds.has(childOpenCodeId)) {
+      subagentStatusMap.delete(childOpenCodeId);
+    }
+  }
+}
+
+export async function reconcileSessionStatuses(directory?: string): Promise<void> {
+  const states = [...sessionStates.values()].filter((state) => directory === undefined || state.cwd === directory);
+  await Promise.all(states.map((state) => reconcileStateSubagents(state)));
 }
 
 /** Kill every persistent OMP child and ephemeral RPC process; used on process shutdown. */
@@ -933,6 +1004,7 @@ export function shutdownAll(): void {
     sessionStates.delete(key);
   }
   sessionBusyLocks.clear();
+  subagentStatusMap.clear();
   for (const backend of allBackends()) {
     try {
       backend.shutdownAll();

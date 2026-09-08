@@ -4,11 +4,13 @@ import {
   getSessionStatusMap,
   isSessionBusy,
   promptSessionAsync,
+  reconcileSessionStatuses,
   shutdownAll,
 } from "./prompt";
 import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
 import type { OmpRpcEvent, OmpRpcTransport } from "./providers/omp/rpc";
+import type { BackendSubagentStatus } from "./providers/types";
 
 /**
  * Fake OMP transport for orchestration tests. Records every RPC and lets the
@@ -21,6 +23,8 @@ class FakeTransport implements OmpRpcTransport {
   switchSessionCalls: string[] = [];
   kills = 0;
   abortError: Error | undefined;
+  subagents: Array<{ id: string; status: BackendSubagentStatus }> = [];
+  subagentsError: Error | undefined;
 
   #handler: ((e: OmpRpcEvent) => void) | undefined;
   #prompts: Array<{ resolve: (v?: unknown) => void; reject: (e: Error) => void }> = [];
@@ -36,6 +40,10 @@ class FakeTransport implements OmpRpcTransport {
         return Promise.resolve({ model: { provider: "vllm", id: "qwen3.8-27b", variant: "default" } });
       case "abort":
         return this.abortError ? Promise.reject(this.abortError) : Promise.resolve();
+      case "get_subagents":
+        return this.subagentsError
+          ? Promise.reject(this.subagentsError)
+          : Promise.resolve({ subagents: this.subagents });
       case "prompt": {
         const s = Promise.withResolvers<unknown>();
         this.#prompts.push(s);
@@ -242,6 +250,31 @@ describe("promptSessionAsync orchestration", () => {
 
     await completePrompt(t, openCodeId, cwd);
     expect(isSessionBusy(openCodeId, cwd)).toBe(false);
+  });
+
+  test("reconciles active subagents from the backend snapshot", async () => {
+    installFakeFactory();
+    const { openCodeId, cwd, sessionPath } = newSession();
+    const res = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+      parts: [{ type: "text", text: "delegate" }],
+    });
+    expect(res).toEqual({ queued: true });
+
+    const t = lastTransport();
+    t.subagents = [{ id: "child-2", status: "running" }];
+    await reconcileSessionStatuses(cwd);
+    expect(getSessionStatusMap(cwd)["ses_child2"]).toEqual({ type: "busy" });
+
+    t.subagentsError = new Error("snapshot unavailable");
+    await reconcileSessionStatuses(cwd);
+    expect(getSessionStatusMap(cwd)["ses_child2"]).toEqual({ type: "busy" });
+
+    t.subagentsError = undefined;
+    t.subagents = [];
+    await reconcileSessionStatuses(cwd);
+    expect(getSessionStatusMap(cwd)["ses_child2"]).toBeUndefined();
+
+    await completePrompt(t, openCodeId, cwd);
   });
 
   test("prompt RPC failure emits an error part and returns the session to idle", async () => {
