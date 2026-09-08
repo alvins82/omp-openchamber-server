@@ -198,6 +198,24 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
 
     const currentProject = await (await fetch(BASE + "project/current?directory=" + encodeURIComponent(DIR_A))).json();
     expect(currentProject).toMatchObject({ id: "global", worktree: DIR_A });
+
+    const projectId = "path_" + Buffer.from(DIR_A).toString("base64url");
+    const projectConfig = await fetch(BASE + "api/projects/" + encodeURIComponent(projectId) + "/config");
+    expect(projectConfig.status).toBe(200);
+    expect(await projectConfig.json()).toMatchObject({
+      trust: { hash: null, trusted: true },
+      setupWorktree: [],
+      setupWorktreeWait: false,
+      shared: { status: "missing" },
+      personal: { setupWorktreeMode: "append" },
+    });
+
+    const projectConfigWrite = await fetch(BASE + "api/projects/" + encodeURIComponent(projectId) + "/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setupWorktree: ["echo ignored"] }),
+    });
+    expect(projectConfigWrite.status).toBe(501);
   });
 
   test("GET /session lists only the requested directory, and nothing without one", async () => {
@@ -771,8 +789,6 @@ await new Promise((r) => setTimeout(r, 60));
     expect(JSON.parse(last).customType).toBe("session_exit");
   });
 });
-
-
 
 
 

@@ -49,6 +49,28 @@ Returns active project workspace metadata.
 }
 ```
 
+### `GET /api/projects/:projectId/config`
+Returns an empty OpenChamber project setup for a path-based project ID. The
+OMP sidecar does not own OpenChamber project settings, so worktree setup
+commands and project actions are not configured through this endpoint.
+
+**Response `200 OK`** includes:
+
+```json
+{
+  "trust": { "hash": null, "trusted": true },
+  "setupWorktree": [],
+  "setupWorktreeWait": false,
+  "projectActions": [],
+  "draftStarters": [],
+  "shared": { "status": "missing" },
+  "personal": { "setupWorktreeMode": "append" }
+}
+```
+
+`PUT /api/projects/:projectId/config` and the `/shared` variant return
+`501 Not Implemented` because the sidecar does not persist those settings.
+
 ---
 
 ## Sessions
