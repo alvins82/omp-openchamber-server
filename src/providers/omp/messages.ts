@@ -164,6 +164,10 @@ export interface AgentMessage {
   details?: unknown;
   usage?: unknown;
   cost?: unknown;
+  /** Persisted OMP completion timestamp in milliseconds since the epoch. */
+  completedAt?: number;
+  /** Persisted OMP model-request duration in milliseconds. */
+  duration?: number;
 }
 
 const TTL_MS = 5_000;
@@ -287,11 +291,12 @@ function mergeToolResultIntoAssistant(
   );
   if (toolParts.length === 0) return false;
 
-  const target = toolParts.find((part) => {
-    if (toolCallId && (part.metadata?.toolCallId === toolCallId || part.callID === toolCallId)) return true;
-    if (toolName && part.tool === toolName && part.state.status === "pending") return true;
-    return false;
-  });
+  const targetByCallId = toolCallId
+    ? toolParts.find((part) => part.metadata?.toolCallId === toolCallId || part.callID === toolCallId)
+    : undefined;
+  const target = targetByCallId ?? (toolName
+    ? toolParts.find((part) => part.tool === toolName && part.state.status === "pending")
+    : undefined);
   if (!target) return false;
 
   if (target.tool === "tool" && toolName) {
@@ -310,15 +315,39 @@ function mergeToolResultIntoAssistant(
   return true;
 }
 
-function updateAssistantCompletion(record: OpenCodeMessageRecord, completedAt: number): void {
+function updateAssistantCompletion(
+  record: OpenCodeMessageRecord,
+  completedAt: number,
+  force = false,
+): void {
   const hasActiveTool = record.parts.some(
     (part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"),
   );
-  if (hasActiveTool) {
+  if (hasActiveTool && !force) {
     delete record.info.time.completed;
     return;
   }
-  record.info.time.completed = completedAt;
+  record.info.time.completed = Math.max(record.info.time.completed ?? 0, completedAt);
+}
+
+function getAssistantCompletionAt(msg: AgentMessage, createdAt: number): number | undefined {
+  if (typeof msg.completedAt === "number" && Number.isFinite(msg.completedAt) && msg.completedAt >= createdAt) {
+    return msg.completedAt;
+  }
+
+  if (typeof msg.duration === "number" && Number.isFinite(msg.duration) && msg.duration >= 0) {
+    const derived = createdAt + msg.duration;
+    if (Number.isFinite(derived)) return derived;
+  }
+
+  return undefined;
+}
+
+function isTerminalAssistantCompletion(msg: AgentMessage, completedAt: number | undefined): boolean {
+  return msg.role === "assistant"
+    && completedAt !== undefined
+    && msg.stopReason !== undefined
+    && msg.stopReason !== "toolUse";
 }
 
 function buildParts(
@@ -546,6 +575,10 @@ export function mapRpcMessagesToOpenCodeRecords(
     if (role === null) continue;
 
     const createdAt = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+    const assistantCompletionAt = msg.role === "assistant"
+      ? getAssistantCompletionAt(msg, createdAt)
+      : undefined;
+    const terminalAssistantCompletion = isTerminalAssistantCompletion(msg, assistantCompletionAt);
 
     if (msg.role === "toolResult" && lastAssistantRecord) {
       if (mergeToolResultIntoAssistant(msg, lastAssistantRecord, createdAt)) {
@@ -644,7 +677,11 @@ export function mapRpcMessagesToOpenCodeRecords(
       if (lastAssistantRecord) {
         const parts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
         lastAssistantRecord.parts.push(...parts);
-        updateAssistantCompletion(lastAssistantRecord, createdAt);
+        updateAssistantCompletion(
+          lastAssistantRecord,
+          assistantCompletionAt ?? createdAt,
+          terminalAssistantCompletion,
+        );
         if (finish) {
           lastAssistantRecord.info.finish = finish;
         } else if (lastAssistantRecord.parts.some((p) => p.type === "tool" && (p.state.status === "pending" || p.state.status === "running"))) {
@@ -712,7 +749,7 @@ export function mapRpcMessagesToOpenCodeRecords(
           },
           parts,
         };
-        updateAssistantCompletion(record, createdAt);
+        updateAssistantCompletion(record, assistantCompletionAt ?? createdAt, terminalAssistantCompletion);
         records.push(record);
         lastAssistantRecord = record;
       }

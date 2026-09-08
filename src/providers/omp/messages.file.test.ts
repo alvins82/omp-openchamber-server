@@ -28,9 +28,24 @@ const userMsg = (id: string, text: string, ts = 1755927600000) => ({
   message: { id, role: "user", content: text, timestamp: ts },
 });
 
-const asstMsg = (id: string, content: unknown[], ts = 1755927605000, stopReason = "stop") => ({
+const asstMsg = (
+  id: string,
+  content: unknown[],
+  ts = 1755927605000,
+  stopReason = "stop",
+  timing: { completedAt?: number; duration?: number } = {},
+) => ({
   type: "message", id, timestamp: new Date(ts).toISOString(),
-  message: { id, role: "assistant", content, provider: "sidevllm", model: "qwen", stopReason, timestamp: ts },
+  message: {
+    id,
+    role: "assistant",
+    content,
+    provider: "sidevllm",
+    model: "qwen",
+    stopReason,
+    timestamp: ts,
+    ...timing,
+  },
 });
 
 describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
@@ -79,6 +94,101 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out![1].info.time.completed).toBe(1755927605000);
     expect(out![1].info.model).toEqual({ id: "qwen", providerID: "sidevllm", modelID: "qwen", variant: "default" });
     expect(out![1].parts[0].type).toBe("text");
+  });
+
+  it("uses persisted completion metadata instead of the assistant start time", async () => {
+    const path = fileFor("assistant-timing.jsonl", [
+      userMsg("timing-user", "check timing", 1755927600000),
+      asstMsg(
+        "timing-assistant",
+        [{ type: "text", text: "done" }],
+        1755927601000,
+        "stop",
+        { completedAt: 1755927605200, duration: 999999 },
+      ),
+      userMsg("duration-user", "check fallback", 1755927610000),
+      asstMsg(
+        "duration-assistant",
+        [{ type: "text", text: "done" }],
+        1755927611000,
+        "stop",
+        { duration: 1250 },
+      ),
+    ]);
+
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    expect(out).toHaveLength(4);
+    expect(out![1].info.time.completed).toBe(1755927605200);
+    expect(out![3].info.time.completed).toBe(1755927612250);
+  });
+
+  it("matches repeated tool names by call ID before falling back to the name", async () => {
+    const path = fileFor("tool-call-id-precedence.jsonl", [
+      userMsg("same-tool-user", "run both", 1755927600000),
+      asstMsg("same-tool-assistant-1", [
+        { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "one" } },
+      ], 1755927601000, "toolUse"),
+      asstMsg("same-tool-assistant-2", [
+        { type: "toolCall", id: "call-2", name: "bash", arguments: { command: "two" } },
+      ], 1755927602000, "toolUse"),
+      {
+        type: "message",
+        id: "same-tool-result-2",
+        timestamp: new Date(1755927603000).toISOString(),
+        message: {
+          role: "toolResult",
+          toolCallId: "call-2",
+          toolName: "bash",
+          content: "result two",
+          timestamp: 1755927603000,
+        },
+      },
+      {
+        type: "message",
+        id: "same-tool-result-1",
+        timestamp: new Date(1755927604000).toISOString(),
+        message: {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "bash",
+          content: "result one",
+          timestamp: 1755927604000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    const tools = out![1].parts.filter((part) => part.type === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools.map((part) => part.type === "tool" ? part.state.status : undefined)).toEqual([
+      "completed",
+      "completed",
+    ]);
+    expect(tools.map((part) => part.type === "tool" ? part.state.output : undefined)).toEqual([
+      "result one",
+      "result two",
+    ]);
+  });
+
+  it("honors a terminal assistant completion over stale pending tool state", async () => {
+    const path = fileFor("terminal-completion.jsonl", [
+      userMsg("terminal-user", "finish this", 1755927600000),
+      asstMsg("terminal-tool-step", [
+        { type: "toolCall", id: "call-stale", name: "bash", arguments: { command: "work" } },
+      ], 1755927601000, "toolUse", { completedAt: 1755927601200 }),
+      asstMsg(
+        "terminal-final-step",
+        [{ type: "text", text: "finished" }],
+        1755927602000,
+        "stop",
+        { completedAt: 1755927603200 },
+      ),
+    ]);
+
+    const out = await loadMessagesFromFile(path, SID, TEST_DB);
+    expect(out![1].info.time.completed).toBe(1755927603200);
+    const pendingTool = out![1].parts.find((part) => part.type === "tool");
+    expect(pendingTool?.type === "tool" ? pendingTool.state.status : undefined).toBe("pending");
   });
 
   it("derives record id and timestamp from the entry when the inner message lacks them", async () => {
