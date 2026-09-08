@@ -36,7 +36,10 @@ emits it back), `getTodos`.
 ### `BackendTurnConnection` — one live turn
 
 `onEvent(sink)`, `prompt(input)`, `setModel(providerID, modelID)`,
-`abort()`, `kill()`, and optional `getInitialModel()`. Backends translate
+`abort()`, `kill()`, and optional `getInitialModel()` and
+`getSubagentStatuses()`. The latter returns the backend's current live
+subagent snapshot so `/session/status` can recover when a lifecycle event was
+missed. Backends translate
 their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 `text_delta`, `reasoning_delta`, `tool`, `usage`, `model`, approvals/questions,
 `subagent_*`, `todo`, `turn_end`. Ownership rules (from the type comments):

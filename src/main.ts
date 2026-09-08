@@ -26,6 +26,7 @@ import {
   promptSessionAsync,
   abortSession,
   getSessionStatusMap,
+  reconcileSessionStatuses,
   removeSessionState,
   shutdownAll,
 } from "./prompt";
@@ -1038,7 +1039,8 @@ const MIME_TYPES: Record<string, string> = {
 
       // Session status
       if (p === "/session/status" && req.method === "GET") {
-        return json(getSessionStatusMap());
+        await reconcileSessionStatuses(dir);
+        return json(getSessionStatusMap(dir));
       }
 
       // Single session routes: /session/:id

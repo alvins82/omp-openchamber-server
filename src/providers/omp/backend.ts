@@ -8,6 +8,7 @@
 import type {
   AgentBackend,
   BackendCapabilities,
+  BackendSubagentSnapshot,
   BackendTurnConnection,
   ModelRef,
   OpenCodeProvidersResponse,
@@ -31,6 +32,7 @@ import {
   listOmpChildSessions,
   listOmpSessions,
   setOmpSessionTitle,
+  toOpenCodeSessionId,
   updateOmpSession,
 } from "./store";
 
@@ -66,6 +68,30 @@ export function resetOmpTransportFactory(): void {
   ompTransportFactory = defaultOmpTransportFactory;
 }
 
+function isBackendSubagentStatus(value: unknown): value is BackendSubagentSnapshot["status"] {
+  return value === "pending" || value === "running" || value === "completed" || value === "failed" || value === "aborted";
+}
+
+function parseSubagentSnapshots(value: unknown): BackendSubagentSnapshot[] {
+  if (value === null || typeof value !== "object" || !("subagents" in value) || !Array.isArray(value.subagents)) {
+    throw new Error("invalid get_subagents response");
+  }
+
+  return value.subagents.map((entry, index) => {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      !("id" in entry) ||
+      typeof entry.id !== "string" ||
+      !("status" in entry) ||
+      !isBackendSubagentStatus(entry.status)
+    ) {
+      throw new Error(`invalid get_subagents entry at index ${index}`);
+    }
+    return { id: toOpenCodeSessionId(entry.id), status: entry.status };
+  });
+}
+
 /**
  * Builds a turn connection over an existing transport. The normalizer owns
  * all backend-specific event translation; the returned object is exactly the
@@ -99,6 +125,9 @@ export function createOmpTurnConnection(transport: OmpRpcTransport, ctx: OmpTurn
       } catch {
         return undefined;
       }
+    },
+    async getSubagentStatuses() {
+      return parseSubagentSnapshots(await transport.request("get_subagents"));
     },
     abort() {
       return transport.request("abort", {});
@@ -193,4 +222,3 @@ export const ompBackend: AgentBackend = {
     OmpRpcConnection.killAll();
   },
 };
-

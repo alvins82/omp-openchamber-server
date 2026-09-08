@@ -226,6 +226,13 @@ export interface OpenCodeMessageRecord {
 
 export type SubagentStatus = "busy" | "idle";
 
+export type BackendSubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+
+export interface BackendSubagentSnapshot {
+  id: string;
+  status: BackendSubagentStatus;
+}
+
 export type NormalizedTurnEvent =
   | { kind: "text_delta"; text: string }
   | { kind: "reasoning_delta"; text: string }
@@ -286,6 +293,8 @@ export interface BackendTurnConnection {
   setModel(providerID: string, modelID: string): Promise<unknown>;
   /** Model currently configured on the backend session, if discoverable. */
   getInitialModel?(): Promise<ModelRef | undefined>;
+  /** Current subagent snapshot, used to recover missed lifecycle events. */
+  getSubagentStatuses?(): Promise<BackendSubagentSnapshot[]>;
   abort(): Promise<unknown>;
   kill(): void;
 }
