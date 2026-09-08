@@ -70,6 +70,53 @@ function createProjectIdFromPath(projectPath: string): string {
   return `path_${encoded}`;
 }
 
+function projectPathFromId(projectId: string): string | null {
+  if (!projectId.startsWith("path_")) return null;
+  const encoded = projectId.slice("path_".length);
+  if (!encoded) return null;
+
+  try {
+    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const decoded = new TextDecoder().decode(bytes).trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
+function emptyProjectSetup(projectPath: string) {
+  return {
+    trust: { hash: null, trusted: true },
+    setupWorktree: [],
+    setupWorktreeWait: false,
+    projectActions: [],
+    projectActionsPrimaryId: null,
+    draftStarters: [],
+    shared: {
+      status: "missing",
+      path: join(projectPath, ".openchamber", "project.json"),
+      setupWorktree: [],
+      setupWorktreeWait: null,
+      projectActions: [],
+      draftStarters: [],
+      plansDir: null,
+    },
+    personal: {
+      setupWorktree: [],
+      setupWorktreeWait: null,
+      setupWorktreeMode: "append",
+      projectActions: [],
+      projectActionsPrimaryId: null,
+      draftStarters: [],
+      hiddenSharedActionIds: [],
+      sharedTrust: null,
+    },
+  };
+}
+
 const providerCache = new Map<string, { data: OpenCodeProvidersResponse; expiresAt: number }>();
 let globalProviderCache: { data: OpenCodeProvidersResponse; expiresAt: number } | null = null;
 
@@ -279,6 +326,17 @@ const server = Bun.serve({
 
       if (path === "/api/client-auth/clients") {
         return json({ token: "omp-local-token" });
+      }
+
+      // OpenChamber project setup is optional for the OMP sidecar. Return the
+      // contract's empty setup so the UI can continue creating sessions while
+      // making it explicit that this adapter does not own project settings.
+      const projectConfigMatch = path.match(/^\/api\/projects\/([^/]+)\/config(\/shared)?$/);
+      if (projectConfigMatch) {
+        const projectPath = projectPathFromId(decodeURIComponent(projectConfigMatch[1]));
+        if (!projectPath) return jsonError("invalid project id", 400);
+        if (req.method === "GET") return json(emptyProjectSetup(projectPath));
+        return jsonError("project config writes are not supported by the OMP sidecar", 501);
       }
 
       // Browser Control Claim
@@ -1873,6 +1931,4 @@ try {
 } catch {
   // ignore
 }
-
-
 
