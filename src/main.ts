@@ -44,6 +44,7 @@ import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { fakeBackend } from "./providers/fake/backend";
 import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveProviderConnection, ensureLegacyOmpConfigMigrated } from "./small-model";
+import { handleGitRequest } from "./git";
 import { createMessageQueueRuntime, isQueueError } from "./message-queue";
 
 // Optional fake backend (test-only): OC_FAKE_BACKEND=1 enables multi-backend
@@ -846,47 +847,12 @@ const MIME_TYPES: Record<string, string> = {
         return json(getAutoAcceptPolicy());
       }
 
-      // Git UI endpoints
-      if (path === "/api/git/check") {
-        const checkDir = url.searchParams.get("directory") || effectiveDir;
-        const isRepo = existsSync(join(checkDir, ".git"));
-        return json({ isGitRepository: isRepo });
-      }
-
-      if (path === "/api/git/global-identity" || path === "/api/git/current-identity") {
-        return json({ name: null, email: null });
-      }
-
-      if (path === "/api/git/has-local-identity") {
-        return json({ hasLocalIdentity: false });
-      }
-
-      if (path === "/api/git/status") {
-        const checkDir = url.searchParams.get("directory") || effectiveDir;
-        const isRepo = existsSync(join(checkDir, ".git"));
-        if (!isRepo) {
-          return json({
-            isGitRepository: false,
-            files: [],
-            branch: null,
-            ahead: 0,
-            behind: 0,
-          });
-        }
-        return json({
-          isGitRepository: true,
-          files: [],
-          branch: "main",
-          ahead: 0,
-          behind: 0,
-          staged: [],
-          unstaged: [],
-          untracked: [],
+      const gitResponse = await handleGitRequest(req, url, effectiveDir);
+      if (gitResponse) {
+        return json(gitResponse.data, {
+          status: gitResponse.status,
+          headers: gitResponse.headers,
         });
-      }
-
-      if (path === "/api/git/identities" || path === "/api/git/discover-credentials") {
-        return json([]);
       }
 
       // Command metadata

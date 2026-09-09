@@ -71,6 +71,84 @@ commands and project actions are not configured through this endpoint.
 `PUT /api/projects/:projectId/config` and the `/shared` variant return
 `501 Not Implemented` because the sidecar does not persist those settings.
 
+## Git
+
+Git routes use the local `git` executable and accept the repository directory
+through the `directory` query parameter. The sidecar supports the read and
+write operations used by OpenChamber's Git view, including repository status,
+branches, diffs, commits, remotes, pull/push/fetch, stashes, merge/rebase
+conflict handling, identities, and worktrees.
+
+### Repository state
+
+`GET /api/git/check` returns `{ "isGitRepository": boolean }`.
+
+`GET /api/git/status` returns the current branch, upstream, ahead/behind
+counts, changed files, diff statistics, and in-progress merge or rebase
+metadata. `GET /api/git/primary-root` and `GET /api/git/toplevel` return
+`{ "root": "/path/to/repository" }`; the former resolves a linked worktree to
+the primary repository.
+
+`GET /api/git/branches` returns:
+
+```json
+{
+  "all": ["main", "feature", "remotes/origin/main"],
+  "current": "feature",
+  "branches": {
+    "feature": {
+      "current": true,
+      "name": "feature",
+      "commit": "0123456789abcdef",
+      "label": "feature",
+      "tracking": "origin/feature",
+      "ahead": 1,
+      "behind": 0
+    }
+  },
+  "defaultBranches": { "origin": "main" }
+}
+```
+
+### Files, history, and worktrees
+
+The following endpoints are available with the same request shapes as the
+OpenChamber Git client:
+
+- `GET /api/git/diff`, `/range-diff`, `/range-files`, `/file-diff`
+- `GET /api/git/log`, `/commit-files`, `/commit-file-diff`
+- `POST /api/git/stage`, `/unstage`, `/revert`, `/apply-hunk`, `/commit`
+- `GET /api/git/worktrees`
+- `POST /api/git/worktrees`, `/worktrees/validate`, `/worktrees/preview`,
+  `/validate-directory`, `/canonicalize-worktree-state`
+- `GET /api/git/worktrees/bootstrap-status` and `GET /api/git/worktree-type`
+- `DELETE /api/git/worktrees`
+
+Worktree creation returns `{ head, name, branch, path, bootstrapStatus }` and
+places managed worktrees under
+`$XDG_DATA_HOME/opencode/worktree/<project-id>` (or
+`~/.local/share/opencode/worktree/<project-id>` by default). Worktree removal
+refuses to remove the primary repository.
+
+### Remotes, history mutations, and identities
+
+`POST /api/git/pull`, `/push`, `/fetch`, `/rebase`, `/merge`,
+`/rebase/continue`, and `/merge/continue` run the corresponding local Git
+operation. Abort routes, checkout, cherry-pick, revert, reset, branch
+creation/deletion/rename, remote management, stash operations, and
+`GET /api/git/conflict-details` are also supported.
+
+Git identity profiles are stored in the user's OpenChamber configuration:
+
+- `GET/POST /api/git/identities`
+- `PUT/DELETE /api/git/identities/:id`
+- `GET /api/git/global-identity`, `/current-identity`,
+  `/has-local-identity`, `/discover-credentials`
+- `POST /api/git/set-identity`
+
+Credentials are never returned; discovery reports only credential host and
+username.
+
 ---
 
 ## Sessions
