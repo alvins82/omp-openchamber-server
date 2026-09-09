@@ -25,8 +25,9 @@
             │ stdio NDJSON      │ Direct FS Read
             ▼                   ▼
 ┌───────────────────────┐ ┌───────────────────────────────────┐
-│     oh-my-pi CLI      │ │         Session JSONL             │
-│ (omp --mode rpc ...)  │ │  (~/.omp/agent/sessions/*/*.jsonl) │
+│   project-owned OMP   │ │         Session JSONL             │
+│       CLI binary      │ │  (~/.omp/agent/sessions/*/*.jsonl) │
+│ (omp --mode rpc ...)  │ │                                  │
 └───────────────────────┘ └───────────────────────────────────┘
 ```
 
@@ -62,6 +63,8 @@ The adapter seam that lets the sidecar serve multiple agent backends behind one 
 
 ### 5. OMP RPC Process Manager (`src/providers/omp/rpc.ts`)
 - Spawns and manages `omp --mode rpc` child processes communicating via newline-delimited JSON (NDJSON) over standard I/O.
+- Ensures the project-owned `resources/omp` binary exists before the HTTP server starts, downloading the pinned platform-specific OMP release when it is missing.
+- Resolves `OMP_BIN` only as an explicit test/development override; otherwise it uses the staged project-owned binary and never searches PATH or common install directories.
 - **Persistent Children**: Maintained per `(sessionID, directory)` pair for conversational prompt turns.
 - **Ephemeral Children**: Spawned on-demand with automatic teardown for one-shot commands (e.g. `/config/providers`).
 - **Resilience & Gating**:

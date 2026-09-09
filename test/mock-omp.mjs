@@ -32,6 +32,11 @@
 
 import { appendFileSync } from "node:fs";
 
+if (process.argv.includes("--version")) {
+  process.stdout.write("omp/17.3.5\n");
+  process.exit(0);
+}
+
 function argValue(flag) {
   const argv = process.argv.slice(1);
   const i = argv.indexOf(flag);

@@ -6,17 +6,28 @@ Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my
 
 ### 1. Prerequisites
 
-- [`omp`](https://github.com/can1357/oh-my-pi) on `PATH`
 - [OpenChamber](https://github.com/OpenChamber/OpenChamber) installed or running
 - [Bun](https://bun.sh) runtime
+- Network access on first startup so the pinned OMP release can be downloaded
 
 ### 2. Start the Proxy Server
 
 ```bash
 bun install
-bun run start
+bun run src/main.ts
 # → [proxy] listening on http://127.0.0.1:4096
 ```
+
+On startup the sidecar checks the project-owned `resources/omp` directory and
+downloads the pinned OMP release there when it is missing. It always launches
+that staged binary; it never falls back to an installed `omp` or `PATH`.
+`bun run prepare:omp` can be used to stage it manually, and `bun run
+verify:omp` verifies the staged release. Set `OMP_VERSION` when preparing a
+different release, or `OMP_TARGET` when staging one of the supported release
+targets explicitly.
+
+`OMP_BIN` remains an explicit override for tests and local development. It is
+not inferred from the environment or used as a fallback.
 
 ### 3. Connect to OpenChamber
 

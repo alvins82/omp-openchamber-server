@@ -34,6 +34,7 @@ import {
 } from "./prompt";
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
 import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
+import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion } from "./providers/omp/binary";
 import type { OpenCodeProvidersResponse } from "./providers/types";
 import { logger, httpLogger } from "./logger";
 import { join, isAbsolute, basename, extname } from "node:path";
@@ -274,6 +275,8 @@ interface SidecarWebSocketData {
 }
 
 const webSocketCleanups = new WeakMap<object, () => void>();
+
+await ensureOmpBinary();
 
 const server = Bun.serve<SidecarWebSocketData>({
   port: Number(process.env.OC_SIDECAR_PORT ?? 4096),
@@ -1951,6 +1954,7 @@ function logStartupBanner(port?: number): void {
     .join(", ");
   const extPaths = getSidecarExtensionPaths();
   const extensions = extPaths.length > 0 ? extPaths.map((p) => basename(p)).join(", ") : "none";
+  const ompRuntime = getOmpRuntimeInfo();
   const smallModel = resolveSmallModel();
   let smallModelInfo = "none configured";
   if (smallModel) {
@@ -1964,9 +1968,16 @@ function logStartupBanner(port?: number): void {
   logger.info(`[sidecar] Configuration:`);
   logger.info(`  • Working directory : ${process.cwd()}`);
   logger.info(`  • Active adapters   : ${backendList}`);
+  logger.info(`  • OMP version       : ${ompRuntime.version ?? "unknown"} (${ompRuntime.source})`);
   logger.info(`  • Small model       : ${smallModelInfo}`);
   logger.info(`  • Extensions        : ${extensions}`);
   logger.info(`  • Browser control   : ready`);
+
+  if (ompRuntime.binary && !ompRuntime.version) {
+    void probeOmpVersion(ompRuntime.binary).then((version) => {
+      if (version) logger.info(`[sidecar] OMP version detected: ${version} (${ompRuntime.source})`);
+    });
+  }
 }
 
 logStartupBanner(server.port);

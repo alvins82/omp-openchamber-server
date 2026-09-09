@@ -16,10 +16,13 @@
   "private": true,
   "scripts": {
     "start": "bun run src/main.ts",
+    "prepare:omp": "bun scripts/prepare-omp.ts",
+    "verify:omp": "bun scripts/prepare-omp.ts --verify",
     "test": "bun test",
     "check": "bun run --bun tsc --noEmit",
     "test:live": "OC_LIVE=1 bun test src/integration.live.test.ts"
   },
+  "ompVersion": "18.1.15",
   "type": "module",
   "dependencies": {
     "pino": "^10.3.1",

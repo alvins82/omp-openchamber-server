@@ -1,0 +1,183 @@
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { dirname, join, resolve as resolvePath } from "node:path";
+
+type Environment = Record<string, string | undefined>;
+
+export type OmpRuntimeSource = "override" | "bundled" | "unavailable";
+export type OmpRuntimeInfo = {
+  binary: string | null;
+  version: string | null;
+  source: OmpRuntimeSource;
+};
+
+const bundledBinaryName = process.platform === "win32" ? "omp.exe" : "omp";
+const versionProbeTimeoutMs = 1_000;
+
+function isExecutable(filePath: string): boolean {
+  try {
+    if (!statSync(filePath).isFile()) return false;
+    if (process.platform === "win32") return true;
+    accessSync(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function uniquePaths(paths: Array<string | undefined>): string[] {
+  return [...new Set(paths.filter((value): value is string => Boolean(value && value.trim())))];
+}
+
+function bundledCandidates(env: Environment): string[] {
+  const executableDir = dirname(process.execPath);
+  const configured = uniquePaths([
+    env.OMP_BUNDLED_PATH,
+    env.OMP_BUNDLED_DIR ? join(env.OMP_BUNDLED_DIR, bundledBinaryName) : undefined,
+  ]);
+  if (configured.length > 0) return configured;
+
+  return uniquePaths([
+    join(import.meta.dir, "..", "..", "..", "resources", "omp", bundledBinaryName),
+    join(executableDir, "resources", "omp", bundledBinaryName),
+    process.platform === "darwin"
+      ? join(executableDir, "..", "Resources", "omp", bundledBinaryName)
+      : undefined,
+  ]);
+}
+
+function currentEnvironment(): Environment {
+  return { ...Bun.env, ...process.env };
+}
+
+function sourceForBinary(binaryPath: string, env: Environment): OmpRuntimeSource {
+  if (env.OMP_BIN?.trim()) return "override";
+
+  const resolvedBinary = resolvePath(binaryPath);
+  const isBundled = bundledCandidates(env).some((candidate) => resolvePath(candidate) === resolvedBinary);
+  return isBundled ? "bundled" : "override";
+}
+
+function readBundledVersion(binaryPath: string, env: Environment): string | null {
+  const bundledBinary = bundledCandidates(env).find((candidate) => resolvePath(candidate) === resolvePath(binaryPath));
+  if (!bundledBinary) return null;
+
+  try {
+    return readFileSync(join(dirname(bundledBinary), "omp.json"), "utf8").match(/"version"\s*:\s*"([^"]+)"/)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+function readProcessOutput(stream: Bun.Subprocess["stdout"]): Promise<string> {
+  if (stream === undefined || typeof stream === "number") return Promise.resolve("");
+  return new Response(stream).text();
+}
+
+/**
+ * Resolve the OMP executable used by the sidecar.
+ *
+ * The sidecar only uses the project-owned staged binary. OMP_BIN remains an
+ * explicit override for tests and local development; it is never inferred
+ * from PATH or from a system-wide installation.
+ */
+export function resolveOmpBinary(env: Environment = currentEnvironment()): string {
+  const explicit = env.OMP_BIN?.trim();
+  if (explicit) return explicit;
+
+  const bundled = bundledCandidates(env).find(isExecutable);
+  if (bundled) return bundled;
+
+  throw new Error(
+    "Project-owned OMP binary not found. Start the sidecar again to let it download automatically, or run `bun run prepare:omp` manually.",
+  );
+}
+
+let ensurePromise: Promise<string> | undefined;
+
+/**
+ * Ensure the project-owned OMP release is staged before the sidecar serves
+ * requests. The preparation script owns version, target, cache, and download
+ * details; this function makes startup enforce that contract.
+ */
+export function ensureOmpBinary(env: Environment = currentEnvironment()): Promise<string> {
+  const explicit = env.OMP_BIN?.trim();
+  if (explicit) return Promise.resolve(explicit);
+
+  const bundled = bundledCandidates(env).find(isExecutable);
+  if (bundled) return Promise.resolve(bundled);
+
+  ensurePromise ??= (async () => {
+    try {
+      const { prepareOmp } = await import("../../../scripts/prepare-omp");
+      await prepareOmp();
+      return resolveOmpBinary(env);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Project-owned OMP binary is unavailable. Automatic download failed: ${detail}. Run \`bun run prepare:omp\` and retry.`,
+      );
+    }
+  })();
+
+  return ensurePromise;
+}
+
+/**
+ * Return the version known for the same OMP executable the sidecar will spawn.
+ *
+ * Bundled binaries carry metadata written by prepare:omp. Explicit overrides
+ * can be probed asynchronously with probeOmpVersion so startup stays responsive.
+ */
+export function getOmpRuntimeInfo(env: Environment = currentEnvironment()): OmpRuntimeInfo {
+  try {
+    const binary = resolveOmpBinary(env);
+    const source = sourceForBinary(binary, env);
+    return {
+      binary,
+      version: source === "bundled" ? readBundledVersion(binary, env) : null,
+      source,
+    };
+  } catch {
+    return { binary: null, version: null, source: "unavailable" };
+  }
+}
+
+/**
+ * Probe an OMP executable without blocking the sidecar's startup path.
+ */
+export async function probeOmpVersion(binaryPath: string): Promise<string | null> {
+  let child: Bun.Subprocess | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    child = Bun.spawn([binaryPath, "--version"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+    });
+
+    const output = await Promise.race([
+      Promise.all([
+        readProcessOutput(child.stdout),
+        readProcessOutput(child.stderr),
+        child.exited,
+      ]).then(([stdout, stderr]) => `${stdout}\n${stderr}`),
+      new Promise<string | null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), versionProbeTimeoutMs);
+      }),
+    ]);
+
+    if (output === null) {
+      child.kill();
+      await child.exited;
+      return null;
+    }
+
+    return output.match(/\b(\d+\.\d+\.\d+)\b/)?.[1] || null;
+  } catch {
+    child?.kill();
+    return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}

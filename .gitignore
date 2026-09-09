@@ -4,3 +4,6 @@ bun.lock
 *.log
 .env
 .env.*
+.cache/omp/
+resources/omp/*
+!resources/omp/.gitkeep

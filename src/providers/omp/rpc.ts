@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenCodeModel, OpenCodeProvider, OpenCodeProvidersResponse } from "../types";
+import { resolveOmpBinary } from "./binary";
 
 export function getSidecarExtensionPaths(): string[] {
   const extensionsDir = join(import.meta.dir, "..", "..", "..", "extensions");
@@ -183,13 +184,7 @@ export class OmpRpcConnection {
   }
 
   static async spawn(cwd: string, maxAttempts = 3): Promise<OmpRpcConnection> {
-    // OMP_BIN (absolute path) overrides `which omp`; used by the test suite to
-    // point the sidecar at a mock OMP child speaking the same NDJSON RPC.
-    const envBin = Bun.env.OMP_BIN;
-    const omp =
-      envBin !== undefined && envBin !== ""
-        ? envBin
-        : (await Bun.$`which omp`.quiet()).text().trim();
+    const omp = resolveOmpBinary();
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // detached: the child leads its own process group so kill() can take
