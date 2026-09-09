@@ -327,6 +327,38 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(sessionErrorEvt).toBeDefined();
   });
 
+  it("turn_end with nested provider error emits error text part, message finish error, and session.error event", () => {
+    const errorEvent = {
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "400 This model's maximum context length is 117120 tokens.",
+        errorStatus: 400,
+        errorId: 8392704,
+        provider: "vllm",
+        model: "qwen3.8-27b",
+      },
+    } as unknown as OmpRpcEvent;
+    expect(runTurn([errorEvent])).toBe(1);
+    expect(got.length).toBeGreaterThanOrEqual(3);
+
+    const messagePartEvt = got.find((e) => e.type === "message.part.updated");
+    expect(messagePartEvt).toBeDefined();
+    const partProps = messagePartEvt!.properties.part as Record<string, unknown>;
+    expect(partProps.type).toBe("text");
+    expect(partProps.text).toContain("400 This model's maximum context length");
+
+    const finalMessageUpdatedEvt = got.filter((e) => e.type === "message.updated").at(-1);
+    expect(finalMessageUpdatedEvt).toBeDefined();
+    const infoProps = finalMessageUpdatedEvt!.properties.info as Record<string, unknown>;
+    expect(infoProps.finish).toBe("error");
+    expect((infoProps.error as { message: string })?.message).toContain("maximum context length");
+
+    const sessionErrorEvt = got.find((e) => e.type === "session.error");
+    expect(sessionErrorEvt).toBeDefined();
+  });
+
   it("prompt_result with agentInvoked false also completes silently", () => {
     const ev = { type: "prompt_result", agentInvoked: false } as unknown as OmpRpcEvent;
     expect(runTurn([ev])).toBe(1);

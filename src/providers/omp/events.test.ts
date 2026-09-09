@@ -184,6 +184,28 @@ describe("terminal turn_end", () => {
     expect(h.events[0].error).toBe("boom");
     expect(h.events[0].stopReason).toBe("error");
   });
+
+  test("nested provider error on turn_end surfaces as turn_end error", () => {
+    const h = createHarness();
+    h.feed({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        provider: "vllm",
+        model: "qwen3.8-27b",
+        stopReason: "error",
+        errorStatus: 400,
+        errorId: 8392704,
+        errorMessage: "context window exceeded",
+      },
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual(["model", "turn_end"]);
+    const turnEnd = h.events[1];
+    if (turnEnd.kind !== "turn_end") return;
+    expect(turnEnd.error).toBe("context window exceeded");
+    expect(turnEnd.stopReason).toBe("error");
+  });
 });
 
 describe("non-terminal grace window", () => {
