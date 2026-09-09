@@ -1,5 +1,6 @@
 import { readdir, stat, mkdir, unlink, appendFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -69,6 +70,74 @@ export function fromOpenCodeSessionId(openCodeId: string): string {
     raw.slice(16, 20),
     raw.slice(20, 32),
   ].join("-");
+}
+
+function normalizeSessionAlias(value: string): string {
+  return value
+    .replace(/\.jsonl$/i, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+function isCanonicalOpenCodeSessionId(openCodeId: string): boolean {
+  return /^ses_[0-9a-f]{32}$/i.test(openCodeId);
+}
+
+/**
+ * Read only the persisted session UUID from the header without waiting on the
+ * async store scanner. Subagent lifecycle frames can arrive synchronously
+ * with the file creation, so the event bridge needs a small synchronous fast
+ * path to publish the canonical id before the UI fetches the child transcript.
+ */
+export function readSessionIdSync(filePath: string): string | undefined {
+  try {
+    const text = readFileSync(filePath, "utf8");
+    for (const line of text.split("\n").slice(0, 200)) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type === "session" && typeof entry.id === "string" && entry.id.length > 0) {
+          return entry.id;
+        }
+      } catch {
+        // Skip title slots and malformed preamble lines.
+      }
+    }
+  } catch {
+    // The file may not have been flushed yet; callers retain their fallback id.
+  }
+  return undefined;
+}
+
+/**
+ * Resolve an OMP subagent name/id to the canonical OpenCode session id.
+ *
+ * OMP lifecycle snapshots may identify a child by its task name (for example
+ * `RecentActivity`), while the JSONL header owns the UUID used by every
+ * session route. Keep the name fallback for backends that do not persist a
+ * child artifact, but prefer the authoritative child header whenever one is
+ * available.
+ */
+export async function resolveOmpSubagentOpenCodeId(
+  rawId: string,
+  parentOpenCodeId: string,
+  directory?: string | null,
+): Promise<string> {
+  const fallback = toOpenCodeSessionId(rawId);
+  if (isCanonicalOpenCodeSessionId(fallback)) return fallback;
+
+  try {
+    const alias = normalizeSessionAlias(rawId);
+    if (!alias) return fallback;
+    const children = await listOmpChildSessions(parentOpenCodeId, directory);
+    const match = children.find((session) => (
+      normalizeSessionAlias(session.title ?? "") === alias ||
+      normalizeSessionAlias(basename(session.path)) === alias
+    ));
+    return match?.id ?? fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function readSessionHeader(
@@ -534,6 +603,9 @@ export async function getOmpSessionByOpenCodeId(
   directory?: string | null,
 ): Promise<OpenCodeSession | null> {
   const ompId = fromOpenCodeSessionId(openCodeId);
+  const requestedAlias = isCanonicalOpenCodeSessionId(openCodeId)
+    ? undefined
+    : normalizeSessionAlias(openCodeId.replace(/^ses_/i, ""));
 
   let entries: { name: string; isDirectory(): boolean }[];
   try {
@@ -567,7 +639,11 @@ export async function getOmpSessionByOpenCodeId(
         const filePath = join(dirPath, ent.name);
         const header = await readSessionHeader(filePath);
         if (!header) continue;
-        if (header.id === ompId || toOpenCodeSessionId(header.id) === openCodeId) {
+        if (
+          header.id === ompId ||
+          toOpenCodeSessionId(header.id) === openCodeId ||
+          (requestedAlias !== undefined && normalizeSessionAlias(header.title ?? "") === requestedAlias)
+        ) {
           if (directory && header.cwd !== directory) continue;
           return buildOpenCodeSession(header, filePath);
         }
@@ -588,7 +664,15 @@ export async function getOmpSessionByOpenCodeId(
           const subFilePath = join(subDirPath, subFile);
           const subHeader = await readSessionHeader(subFilePath);
           if (!subHeader) continue;
-          if (subHeader.id === ompId || toOpenCodeSessionId(subHeader.id) === openCodeId) {
+          const childAlias = normalizeSessionAlias(subFile);
+          if (
+            subHeader.id === ompId ||
+            toOpenCodeSessionId(subHeader.id) === openCodeId ||
+            (requestedAlias !== undefined && (
+              childAlias === requestedAlias ||
+              normalizeSessionAlias(subHeader.title ?? "") === requestedAlias
+            ))
+          ) {
             if (!subHeader.parentSession && parentOmpUuid) {
               subHeader.parentSession = parentOmpUuid;
             }

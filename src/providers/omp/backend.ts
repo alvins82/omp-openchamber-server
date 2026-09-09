@@ -31,8 +31,8 @@ import {
   getOmpSessionByOpenCodeId,
   listOmpChildSessions,
   listOmpSessions,
+  resolveOmpSubagentOpenCodeId,
   setOmpSessionTitle,
-  toOpenCodeSessionId,
   updateOmpSession,
 } from "./store";
 
@@ -72,12 +72,16 @@ function isBackendSubagentStatus(value: unknown): value is BackendSubagentSnapsh
   return value === "pending" || value === "running" || value === "completed" || value === "failed" || value === "aborted";
 }
 
-function parseSubagentSnapshots(value: unknown): BackendSubagentSnapshot[] {
+async function parseSubagentSnapshots(
+  value: unknown,
+  parentOpenCodeId: string,
+  directory: string,
+): Promise<BackendSubagentSnapshot[]> {
   if (value === null || typeof value !== "object" || !("subagents" in value) || !Array.isArray(value.subagents)) {
     throw new Error("invalid get_subagents response");
   }
 
-  return value.subagents.map((entry, index) => {
+  return Promise.all(value.subagents.map(async (entry, index) => {
     if (
       entry === null ||
       typeof entry !== "object" ||
@@ -88,8 +92,11 @@ function parseSubagentSnapshots(value: unknown): BackendSubagentSnapshot[] {
     ) {
       throw new Error(`invalid get_subagents entry at index ${index}`);
     }
-    return { id: toOpenCodeSessionId(entry.id), status: entry.status };
-  });
+    return {
+      id: await resolveOmpSubagentOpenCodeId(entry.id, parentOpenCodeId, directory),
+      status: entry.status,
+    };
+  }));
 }
 
 /**
@@ -127,7 +134,7 @@ export function createOmpTurnConnection(transport: OmpRpcTransport, ctx: OmpTurn
       }
     },
     async getSubagentStatuses() {
-      return parseSubagentSnapshots(await transport.request("get_subagents"));
+      return parseSubagentSnapshots(await transport.request("get_subagents"), ctx.openCodeId, ctx.cwd);
     },
     abort() {
       return transport.request("abort", {});

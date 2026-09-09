@@ -116,6 +116,9 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(fetchedChild).not.toBeNull();
     expect(fetchedChild?.id).toBe(toOpenCodeSessionId(childUuid));
 
+    const fetchedByAlias = await getOmpSessionByOpenCodeId("ses_researchworker", TEST_DIR);
+    expect(fetchedByAlias?.id).toBe(toOpenCodeSessionId(childUuid));
+
     // 6. Verify loadSessionMessages parses the child transcript
     const messages = await loadSessionMessages(toOpenCodeSessionId(childUuid), TEST_DIR);
     expect(messages.length).toBe(2);
@@ -171,6 +174,65 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(getSessionStatusMap()["ses_subworker1"]).toBeUndefined();
 
     unsub();
+  });
+
+  it("uses the persisted child UUID when OMP identifies a subagent by name", async () => {
+    const parent = await createOmpSession(TEST_DIR, { title: "Parent With Named Child" });
+    const artifactDir = parent.path.replace(/\.jsonl$/, "");
+    await mkdir(artifactDir, { recursive: true });
+
+    const childUuid = "019ef37e-f6e3-7006-88ad-5025bade750d";
+    const childFile = join(artifactDir, "RecentActivity.jsonl");
+    await Bun.write(childFile, `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: childUuid,
+      timestamp: new Date().toISOString(),
+      cwd: TEST_DIR,
+    })}\n`);
+
+    const events: OpenCodeEvent[] = [];
+    const unsubEvents = subscribeOpenCodeEvents((event) => events.push(event));
+    const transport = new FeedingTransport();
+    const conn = createOmpTurnConnection(transport, { openCodeId: parent.id, cwd: TEST_DIR });
+    const unsubscribe = conn.onEvent(
+      createEventHandler(
+        parent.id,
+        "msg_parent",
+        { providerID: "omp", modelID: "omp", variant: "default" },
+        () => {},
+        TEST_DIR,
+      ),
+    );
+
+    transport.feed({
+      type: "subagent_lifecycle",
+      payload: {
+        id: "RecentActivity",
+        status: "started",
+        agent: "task",
+        sessionFile: childFile,
+      },
+    } as unknown as OmpRpcEvent);
+
+    const created = events.find((event) => event.type === "session.created");
+    const createdSession = (created?.properties?.info || created?.properties?.session) as { id?: string } | undefined;
+    expect(createdSession?.id).toBe(toOpenCodeSessionId(childUuid));
+    expect(getSessionStatusMap(TEST_DIR)[toOpenCodeSessionId(childUuid)]).toEqual({ type: "busy" });
+
+    transport.subagents = [{ id: "RecentActivity", status: "running" }];
+    expect(await conn.getSubagentStatuses?.()).toEqual([
+      { id: toOpenCodeSessionId(childUuid), status: "running" },
+    ]);
+
+    transport.feed({
+      type: "subagent_lifecycle",
+      payload: { id: "RecentActivity", status: "completed" },
+    } as unknown as OmpRpcEvent);
+    expect(getSessionStatusMap(TEST_DIR)[toOpenCodeSessionId(childUuid)]).toBeUndefined();
+
+    unsubscribe();
+    unsubEvents();
   });
 
   it("reads the backend subagent snapshot and converts ids to OpenCode ids", async () => {

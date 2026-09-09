@@ -252,6 +252,12 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
   });
 
   test("OpenChamber auxiliary /api endpoints respond with 200", async () => {
+    const queueResp = await fetch(`${BASE}api/message-queue`);
+    expect(queueResp.status).toBe(200);
+    const queueJson = await queueResp.json() as { revision?: unknown; sessions?: unknown };
+    expect(typeof queueJson.revision).toBe("number");
+    expect(Array.isArray(queueJson.sessions)).toBe(true);
+
     // message-sent
     const msgSentResp = await fetch(`${BASE}api/sessions/ses_test123/message-sent`, { method: "POST" });
     expect(msgSentResp.status).toBe(200);

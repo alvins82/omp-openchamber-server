@@ -2,6 +2,8 @@ import { allBackends, backendById, backendForSession, defaultBackend, listProvid
 import { listAvailableCommands, listAvailableSkills } from "./discovery";
 import {
   createOpenCodeEventStream,
+  createOpenChamberNotificationStream,
+  attachOpenCodeEventWebSocket,
   emitSessionCreated,
   emitSessionUpdated,
   emitSessionDeleted,
@@ -42,6 +44,7 @@ import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { fakeBackend } from "./providers/fake/backend";
 import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveProviderConnection, ensureLegacyOmpConfigMigrated } from "./small-model";
+import { createMessageQueueRuntime, isQueueError } from "./message-queue";
 
 // Optional fake backend (test-only): OC_FAKE_BACKEND=1 enables multi-backend
 // mode over the HTTP surface. Off by default so the omp-only path stays
@@ -49,6 +52,8 @@ import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveP
 if (process.env.OC_FAKE_BACKEND === "1") {
   registerBackend(fakeBackend);
 }
+
+const messageQueueRuntime = createMessageQueueRuntime();
 
 function resolveFsPath(rawPath: string, effectiveDir = process.cwd()): string {
   const home = Bun.env.HOME || process.env.HOME || "/tmp";
@@ -235,13 +240,38 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 
 // OC_SIDECAR_PORT overrides the default 4096 so the route-level test suite can
 // run a second instance without colliding with the live sidecar.
-const server = Bun.serve({
+interface SidecarWebSocketData {
+  directory?: string;
+}
+
+const webSocketCleanups = new WeakMap<object, () => void>();
+
+const server = Bun.serve<SidecarWebSocketData>({
   port: Number(process.env.OC_SIDECAR_PORT ?? 4096),
   idleTimeout: 0,
-  async fetch(req) {
+  websocket: {
+    open(ws) {
+      webSocketCleanups.set(ws, attachOpenCodeEventWebSocket(ws, ws.data.directory));
+    },
+    message() {
+      // The global event stream is server-to-client only.
+    },
+    close(ws) {
+      const cleanup = webSocketCleanups.get(ws);
+      cleanup?.();
+      webSocketCleanups.delete(ws);
+    },
+  },
+  async fetch(req, requestServer) {
     const reqStart = performance.now();
     const cors = getCorsHeaders(req);
     let responseBody: unknown = undefined;
@@ -265,6 +295,12 @@ const server = Bun.serve({
     const path = url.pathname;
     const dir = url.searchParams.get("directory") ?? undefined;
     const effectiveDir = dir ?? process.cwd();
+
+    if (path === "/api/global/event/ws" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const upgraded = requestServer.upgrade(req, { data: { directory: dir } });
+      if (upgraded) return;
+      return jsonError("websocket upgrade failed", 400);
+    }
 
     const dispatch = async (): Promise<Response> => {
       if (req.method === "OPTIONS") {
@@ -973,6 +1009,117 @@ const MIME_TYPES: Record<string, string> = {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
+          },
+        });
+      }
+
+      const queueError = (error: unknown, fallback: string): Response => (
+        isQueueError(error)
+          ? jsonError(error.message, error.status)
+          : jsonError(error instanceof Error ? error.message : fallback, 500)
+      );
+
+      if (p === "/message-queue" && req.method === "GET") {
+        try {
+          await messageQueueRuntime.load();
+          return json(messageQueueRuntime.snapshot());
+        } catch (error) {
+          return queueError(error, "failed to load message queue");
+        }
+      }
+
+      const queueItemsMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/items$/);
+      if (queueItemsMatch && req.method === "POST") {
+        try {
+          const body = asRecord(await readJson(req));
+          return json(await messageQueueRuntime.enqueue(
+            decodeURIComponent(queueItemsMatch[1]),
+            body?.directory,
+            body?.item,
+          ));
+        } catch (error) {
+          return queueError(error, "failed to queue message");
+        }
+      }
+
+      const queueTakeAllMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/take$/);
+      if (queueTakeAllMatch && req.method === "POST") {
+        try {
+          return json(await messageQueueRuntime.takeAll(decodeURIComponent(queueTakeAllMatch[1])));
+        } catch (error) {
+          return queueError(error, "failed to take queued messages");
+        }
+      }
+
+      const queueOrderMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/order$/);
+      if (queueOrderMatch && req.method === "PUT") {
+        try {
+          const body = asRecord(await readJson(req));
+          return json(await messageQueueRuntime.reorder(
+            decodeURIComponent(queueOrderMatch[1]),
+            body?.itemIds,
+          ));
+        } catch (error) {
+          return queueError(error, "failed to reorder queue");
+        }
+      }
+
+      const queueHoldMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/hold$/);
+      if (queueHoldMatch && req.method === "PUT") {
+        try {
+          const body = asRecord(await readJson(req));
+          await messageQueueRuntime.load();
+          return json(messageQueueRuntime.setHold(
+            decodeURIComponent(queueHoldMatch[1]),
+            body?.held,
+            body?.ttlMs,
+          ));
+        } catch (error) {
+          return queueError(error, "failed to update queue hold");
+        }
+      }
+
+      const queueSessionMatch = p.match(/^\/message-queue\/sessions\/([^/]+)$/);
+      if (queueSessionMatch && req.method === "DELETE") {
+        try {
+          return json(await messageQueueRuntime.clear(decodeURIComponent(queueSessionMatch[1])));
+        } catch (error) {
+          return queueError(error, "failed to clear queue");
+        }
+      }
+
+      const queueItemActionMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/items\/([^/]+)\/(take)$/);
+      if (queueItemActionMatch && req.method === "POST") {
+        try {
+          return json(await messageQueueRuntime.take(
+            decodeURIComponent(queueItemActionMatch[1]),
+            decodeURIComponent(queueItemActionMatch[2]),
+          ));
+        } catch (error) {
+          return queueError(error, "failed to take queued message");
+        }
+      }
+
+      const queueItemDeleteMatch = p.match(/^\/message-queue\/sessions\/([^/]+)\/items\/([^/]+)$/);
+      if (queueItemDeleteMatch && req.method === "DELETE") {
+        try {
+          return json(await messageQueueRuntime.remove(
+            decodeURIComponent(queueItemDeleteMatch[1]),
+            decodeURIComponent(queueItemDeleteMatch[2]),
+          ));
+        } catch (error) {
+          return queueError(error, "failed to remove queued message");
+        }
+      }
+
+      if (p === "/notifications/stream" && req.method === "GET") {
+        return new Response(createOpenChamberNotificationStream(), {
+          headers: {
+            ...cors,
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
           },
         });
       }
@@ -1832,6 +1979,7 @@ function logStartupBanner(port?: number): void {
 }
 
 logStartupBanner(server.port);
+messageQueueRuntime.start();
 
 // Keepalive interval so Bun's event loop wakes up frequently to process POSIX signals
 // (SIGINT/SIGTERM) immediately even when Bun.serve has no pending I/O.
@@ -1872,6 +2020,7 @@ function handleShutdownSignal(signal: string) {
   }
   try {
     browserControlBroker.rejectAll("Server shutting down");
+    messageQueueRuntime.stop();
     shutdownAll();
   } catch {
     // ignore

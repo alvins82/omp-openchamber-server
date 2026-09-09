@@ -9,9 +9,10 @@
  * reduction, todo extraction, and subagent lifecycle mapping.
  */
 import { randomUUID } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
 import type { ModelRef, NormalizedTurnEvent, ToolPartState, TokenBreakdown } from "../types";
 import { mapOmpUsageToTokens } from "./messages";
-import { readSessionHeader, toOpenCodeSessionId } from "./store";
+import { readSessionHeader, readSessionIdSync, toOpenCodeSessionId } from "./store";
 import { extractTodosFromOmpDetails, isTodoTool } from "./todo";
 import type { OmpRpcEvent, OmpRpcTransport } from "./rpc";
 import { normalizeToolInput, normalizeToolOutput } from "../../tool-normalize";
@@ -367,6 +368,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
   let latestTokens: TokenBreakdown = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
   let latestCost = 0;
   const toolParts = new Map<string, { tool: string; state: ToolPartState }>();
+  const subagentSessionIds = new Map<string, string>();
   let nonTerminalTimer: ReturnType<typeof setTimeout> | undefined;
 
   const emit = (event: NormalizedTurnEvent) => sink?.(event);
@@ -386,6 +388,19 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
         emit({ kind: "todo", todos: fetchedTodos });
       }
     }).catch(() => {});
+  };
+
+  const resolveSubagentSessionId = (rawId: string, sessionFile?: string): string => {
+    const cached = subagentSessionIds.get(rawId);
+    if (cached && !sessionFile) return cached;
+
+    const filePath = sessionFile
+      ? (isAbsolute(sessionFile) ? sessionFile : resolve(ctx.cwd, sessionFile))
+      : undefined;
+    const persistedId = filePath ? readSessionIdSync(filePath) : undefined;
+    const resolved = toOpenCodeSessionId(persistedId ?? cached ?? rawId);
+    subagentSessionIds.set(rawId, resolved);
+    return resolved;
   };
 
   const handleFrame = (event: OmpRpcEvent) => {
@@ -592,7 +607,8 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
       const payload = (event.payload || {}) as Record<string, unknown>;
       const subagentId = String(payload.id ?? "");
       if (subagentId) {
-        const childId = toOpenCodeSessionId(subagentId);
+        const sessionFile = typeof payload.sessionFile === "string" ? payload.sessionFile : undefined;
+        const childId = resolveSubagentSessionId(subagentId, sessionFile);
         const status = String(payload.status ?? "");
         const agentName = String(payload.agent ?? "task");
         if (status === "started") {
@@ -604,7 +620,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
             childId,
             agent: agentName,
             description,
-            sessionFile: typeof payload.sessionFile === "string" ? payload.sessionFile : undefined,
+            sessionFile,
           });
         } else {
           emit({ kind: "subagent_ended", childId });
@@ -618,7 +634,10 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
       const progress = (payload.progress || {}) as Record<string, unknown>;
       const subagentId = String(progress.id ?? payload.id ?? "");
       if (subagentId) {
-        const childId = toOpenCodeSessionId(subagentId);
+        const sessionFile = typeof progress.sessionFile === "string"
+          ? progress.sessionFile
+          : (typeof payload.sessionFile === "string" ? payload.sessionFile : undefined);
+        const childId = resolveSubagentSessionId(subagentId, sessionFile);
         const status = String(progress.status ?? "");
         if (status === "running" || status === "busy") {
           emit({ kind: "subagent_status", childId, status: "busy" });
