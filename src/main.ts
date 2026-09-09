@@ -1940,6 +1940,8 @@ const MIME_TYPES: Record<string, string> = {
 
     if (res.status < 200 || res.status >= 400) {
       httpLogger.error(logData, logMsg);
+    } else if (res.status < 300) {
+      httpLogger.trace(logData, logMsg);
     } else {
       httpLogger.info(logData, logMsg);
     }
@@ -2084,4 +2086,3 @@ try {
 } catch {
   // ignore
 }
-
