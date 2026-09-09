@@ -46,6 +46,8 @@ import { fakeBackend } from "./providers/fake/backend";
 import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveProviderConnection, ensureLegacyOmpConfigMigrated } from "./small-model";
 import { handleGitRequest } from "./git";
 import { createMessageQueueRuntime, isQueueError } from "./message-queue";
+import { createProjectContextRuntime, handleProjectContextRequest } from "./project-context";
+import { createSessionKnowledgeRuntime, handleSessionKnowledgeRequest } from "./session-knowledge";
 
 // Optional fake backend (test-only): OC_FAKE_BACKEND=1 enables multi-backend
 // mode over the HTTP surface. Off by default so the omp-only path stays
@@ -152,6 +154,23 @@ async function resolveSessionRoute(openCodeId: string, dir: string | undefined) 
   const session = (await backend.store.get(openCodeId, dir)) || (await backend.store.get(openCodeId));
   return { backend, session };
 }
+
+const openChamberDataDir = Bun.env.OPENCHAMBER_DATA_DIR
+  || process.env.OPENCHAMBER_DATA_DIR
+  || join(homedir(), ".config", "openchamber");
+
+const projectContextRuntime = createProjectContextRuntime({
+  projectsDirPath: join(openChamberDataDir, "projects"),
+});
+
+const sessionKnowledgeRuntime = createSessionKnowledgeRuntime({
+  projectContextRuntime,
+  getSession: async (sessionId, directory) => (await resolveSessionRoute(sessionId, directory)).session,
+  updateSessionMetadata: async (sessionId, directory, metadata) => {
+    const { backend } = await resolveSessionRoute(sessionId, directory);
+    return backend.store.update(sessionId, { metadata }, directory);
+  },
+});
 
 function getOpenChamberSettingsFile(): string {
   const dataDir = Bun.env.OPENCHAMBER_DATA_DIR
@@ -309,6 +328,22 @@ const server = Bun.serve<SidecarWebSocketData>({
           status: 204,
           headers: cors,
         });
+      }
+
+      const projectContextRoute = await handleProjectContextRequest(req, url, projectContextRuntime);
+      if (projectContextRoute) {
+        return json(
+          projectContextRoute.body,
+          projectContextRoute.status === undefined ? undefined : { status: projectContextRoute.status },
+        );
+      }
+
+      const sessionKnowledgeRoute = await handleSessionKnowledgeRequest(req, url, sessionKnowledgeRuntime);
+      if (sessionKnowledgeRoute) {
+        return json(
+          sessionKnowledgeRoute.body,
+          sessionKnowledgeRoute.status === undefined ? undefined : { status: sessionKnowledgeRoute.status },
+        );
       }
 
       // Health
@@ -1652,23 +1687,6 @@ const MIME_TYPES: Record<string, string> = {
     if (msgSentMatch && req.method === "POST") {
       const sessionId = msgSentMatch[1];
       return json({ success: true, sessionId, messageSent: true });
-    }
-
-    // Session knowledge & project context
-    if ((p === "/api/session-knowledge" || p === "/session-knowledge") && req.method === "GET") {
-      return json({ text: "", signature: "", unavailable: false, notes: [], plans: [] });
-    }
-
-    if ((p === "/api/session-knowledge/summary" || p === "/session-knowledge/summary") && req.method === "GET") {
-      return json({ notes: [], plans: [], memory: { global: 0, project: 0 } });
-    }
-
-    if ((p === "/api/session-knowledge/pin" || p === "/session-knowledge/pin") && req.method === "POST") {
-      return json({ pins: [] });
-    }
-
-    if ((p === "/api/session-knowledge/delivered" || p === "/session-knowledge/delivered") && req.method === "POST") {
-      return json({ recorded: true });
     }
 
     // Notification auto-accept

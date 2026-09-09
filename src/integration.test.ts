@@ -218,6 +218,62 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(projectConfigWrite.status).toBe(501);
   });
 
+  test("project context and session knowledge routes are handled by the sidecar", async () => {
+    const projectId = "path_" + Buffer.from(DIR_A).toString("base64url");
+    const contextBase = BASE + "api/project-context/" + encodeURIComponent(projectId);
+
+    const initial = await fetch(contextBase);
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({
+      notes: [],
+      todos: [],
+      plans: [],
+      sharedPlansDir: join(DIR_A, ".openchamber", "plans"),
+    });
+
+    const noteResponse = await fetch(contextBase + "/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: "Remember the sidecar route", source: "manual" }),
+    });
+    expect(noteResponse.status).toBe(201);
+    const notePayload = await noteResponse.json() as { note: { id: string } };
+    expect(notePayload.note.id).toBeString();
+
+    const todoResponse = await fetch(contextBase + "/todos", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ todos: [{ id: "todo-1", text: "Verify the direct route", completed: false, createdAt: Date.now() }] }),
+    });
+    expect(todoResponse.status).toBe(200);
+    expect((await todoResponse.json()).todos).toHaveLength(1);
+
+    const planResponse = await fetch(contextBase + "/plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Sidecar plan", body: "Keep the route local." }),
+    });
+    expect(planResponse.status).toBe(201);
+    const planPayload = await planResponse.json() as { plan: { id: string; source: string } };
+    expect(planPayload.plan.source).toBe("personal");
+
+    const planRead = await fetch(contextBase + "/plans/" + encodeURIComponent(planPayload.plan.id));
+    expect(planRead.status).toBe(200);
+    expect((await planRead.json()).body).toBe("Keep the route local.");
+
+    const pinResponse = await fetch(BASE + "api/session-knowledge/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: SES_A, directory: DIR_A, kind: "note", id: notePayload.note.id, pinned: true }),
+    });
+    expect(pinResponse.status).toBe(200);
+    expect((await pinResponse.json()).pins.notes).toContain(notePayload.note.id);
+
+    const knowledgeResponse = await fetch(BASE + "api/session-knowledge?directory=" + encodeURIComponent(DIR_A) + "&sessionId=" + SES_A);
+    expect(knowledgeResponse.status).toBe(200);
+    expect((await knowledgeResponse.json()).text).toContain("Remember the sidecar route");
+  });
+
   test("GET /session lists only the requested directory, and nothing without one", async () => {
     expect(await (await fetch(BASE + "session")).json()).toEqual([]);
     const a = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A))).json();

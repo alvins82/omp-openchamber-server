@@ -71,6 +71,50 @@ commands and project actions are not configured through this endpoint.
 `PUT /api/projects/:projectId/config` and the `/shared` variant return
 `501 Not Implemented` because the sidecar does not persist those settings.
 
+## OpenChamber project context
+
+The sidecar implements the OpenChamber-owned project context API so the UI can
+connect directly to it. A project ID is the path-derived value
+`path_<base64url(project path)>`.
+
+### `GET /api/project-context/:projectId`
+
+Returns the project's notes, todos, plans, and shared-plans directory. A
+project with no saved context returns `200` with empty arrays.
+
+The following routes use the same project ID:
+
+- `PUT /todos` with `{ "todos": [...] }`
+- `POST /notes` with `{ "body": "...", "source": "manual|selection|agent" }`
+- `PATCH /notes/:noteId` with `{ "body": "..." }` and/or `{ "pinned": true }`
+- `DELETE /notes/:noteId`
+- `POST /plans` with `{ "title": "...", "body": "..." }`
+- `PATCH /plans/:planId` with `{ "pinned": true }`
+- `GET` and `PUT /plans/:planId` (`PUT` accepts `{ "raw": "..." }`)
+- `DELETE /plans/:planId`
+- `POST /plans/:planId/share` and `/unshare`
+
+Context metadata is stored under
+`$OPENCHAMBER_DATA_DIR/projects/:projectId/context.json`, with plan markdown in
+the adjacent `plans/` directory. If `OPENCHAMBER_DATA_DIR` is unset, the
+default is `~/.config/openchamber`. Writes use per-project serialization and
+atomic replacement. The first read migrates legacy context keys from the
+sibling `:projectId.json` file.
+
+### Session knowledge
+
+The sidecar also supports the UI's pinned-context lifecycle:
+
+- `GET /api/session-knowledge?directory=:path&sessionId=:id`
+- `GET /api/session-knowledge/summary?directory=:path&sessionId=:id`
+- `POST /api/session-knowledge/pin`
+- `POST /api/session-knowledge/delivered`
+
+Pin state and delivery signatures are merged into the OpenCode session's
+`metadata.openchamber` object. The sidecar does not inject text into OMP
+prompts; the UI attaches the returned knowledge block as a synthetic prompt
+part, matching the normal OpenChamber server path.
+
 ## Git
 
 Git routes use the local `git` executable and accept the repository directory
