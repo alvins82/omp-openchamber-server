@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache } from "./messages";
+import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache, recordUserMessageId } from "./messages";
 import type { OpenCodeTextPart } from "../types";
 
 const SID = "01234567-89ab-cdef-0123-456789abcdef";
@@ -387,6 +387,36 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out![2].info.role).toBe("user");
     expect(out![4].info.id).toBe("msg_optimistic_live_view");
     expect(out![4].info.role).toBe("user");
+  });
+
+  it("restores synthetic prompt parts from the persisted client-message mapping", async () => {
+    const sessionId = "synthetic-parts-session";
+    const clientMessageId = "msg_synthetic_parts";
+    const syntheticText = "<system-reminder>Goal mode is active.</system-reminder>";
+    recordUserMessageId(
+      sessionId,
+      `Review the docs.\n\n${syntheticText}`,
+      clientMessageId,
+      TEST_DB,
+      [
+        { text: "Review the docs." },
+        { text: syntheticText, synthetic: true },
+      ],
+    );
+
+    const path = fileFor("synthetic-parts.jsonl", [
+      userMsg("omp-user", `Review the docs.\n\n${syntheticText}`),
+      asstMsg("omp-assistant", [{ type: "text", text: "Done" }]),
+    ]);
+    const out = await loadMessagesFromFile(path, sessionId, TEST_DB);
+
+    expect(out).toHaveLength(2);
+    expect(out![0].info.id).toBe(clientMessageId);
+    expect(out![0].parts).toHaveLength(2);
+    expect((out![0].parts[0] as OpenCodeTextPart).text).toBe("Review the docs.");
+    expect((out![0].parts[0] as OpenCodeTextPart).synthetic).toBeUndefined();
+    expect((out![0].parts[1] as OpenCodeTextPart).text).toBe(syntheticText);
+    expect((out![0].parts[1] as OpenCodeTextPart).synthetic).toBe(true);
   });
 
   it("persists client message IDs across complete in-memory cache clear (proxy restart simulation)", async () => {

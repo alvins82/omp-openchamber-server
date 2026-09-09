@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS session_message_ids (
 	session_id TEXT NOT NULL,
 	client_message_id TEXT NOT NULL,
 	prompt_text TEXT NOT NULL,
+	prompt_parts_json TEXT,
 	created_at INTEGER NOT NULL,
 	omp_message_id TEXT,
 	PRIMARY KEY (session_id, client_message_id)
@@ -19,9 +20,15 @@ CREATE TABLE IF NOT EXISTS session_message_ids (
 CREATE INDEX IF NOT EXISTS idx_session_msg_ids_session ON session_message_ids(session_id);
 `;
 
+export interface PersistedPromptTextPart {
+  text: string;
+  synthetic?: boolean;
+}
+
 export interface PersistedMessageMapping {
   clientMessageId: string;
   promptText: string;
+  promptParts?: PersistedPromptTextPart[];
   createdAt: number;
   ompMessageId?: string;
 }
@@ -78,6 +85,11 @@ export function openTitleIndex(overrideDbPath?: string): TitleIndexHandle | unde
     db.run("PRAGMA busy_timeout = 1000");
     db.run("PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;");
     db.run(TITLE_TABLE_DDL);
+    try {
+      db.run("ALTER TABLE session_message_ids ADD COLUMN prompt_parts_json TEXT");
+    } catch {
+      // Existing databases already have the column.
+    }
 
     handle = {
       dbPath,
@@ -93,15 +105,16 @@ export function openTitleIndex(overrideDbPath?: string): TitleIndexHandle | unde
       deleteStmt: db.prepare("DELETE FROM session_titles WHERE session_id = ?"),
       selectAll: db.prepare("SELECT session_id, title FROM session_titles"),
       insertMessageId: db.prepare(`
-        INSERT INTO session_message_ids (session_id, client_message_id, prompt_text, created_at, omp_message_id)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO session_message_ids (session_id, client_message_id, prompt_text, prompt_parts_json, created_at, omp_message_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id, client_message_id) DO UPDATE SET
           prompt_text = excluded.prompt_text,
+          prompt_parts_json = COALESCE(excluded.prompt_parts_json, session_message_ids.prompt_parts_json),
           created_at = excluded.created_at,
           omp_message_id = COALESCE(excluded.omp_message_id, session_message_ids.omp_message_id)
       `),
       selectMessageIds: db.prepare(`
-        SELECT client_message_id, prompt_text, created_at, omp_message_id
+        SELECT client_message_id, prompt_text, prompt_parts_json, created_at, omp_message_id
         FROM session_message_ids
         WHERE session_id = ?
         ORDER BY created_at ASC, rowid ASC
@@ -299,6 +312,30 @@ export function searchMatchingSessionIds(
  * Record or update a client message ID mapping for a session.
  * Best-effort: errors are swallowed.
  */
+function parsePersistedPromptParts(value: unknown): PersistedPromptTextPart[] | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+
+  const parts: PersistedPromptTextPart[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.text !== "string") continue;
+    parts.push({
+      text: record.text,
+      ...(record.synthetic === true ? { synthetic: true } : {}),
+    });
+  }
+  return parts.length > 0 ? parts : undefined;
+}
+
 export function recordPersistedMessageId(
   sessionId: string,
   clientMessageId: string,
@@ -306,13 +343,22 @@ export function recordPersistedMessageId(
   createdAt?: number,
   ompMessageId?: string,
   dbPath?: string,
+  promptParts?: PersistedPromptTextPart[],
 ): void {
   if (!sessionId || !clientMessageId) return;
   const index = openTitleIndex(dbPath);
   if (!index) return;
   try {
     const ts = typeof createdAt === "number" && Number.isFinite(createdAt) ? createdAt : Date.now();
-    index.insertMessageId.run(sessionId, clientMessageId, promptText || "", ts, ompMessageId ?? null);
+    const serializedParts = promptParts && promptParts.length > 0 ? JSON.stringify(promptParts) : null;
+    index.insertMessageId.run(
+      sessionId,
+      clientMessageId,
+      promptText || "",
+      serializedParts,
+      ts,
+      ompMessageId ?? null,
+    );
   } catch {
     /* best-effort */
   }
@@ -332,12 +378,14 @@ export function listPersistedMessageIds(
     const rows = index.selectMessageIds.all(sessionId) as Array<{
       client_message_id: string;
       prompt_text: string;
+      prompt_parts_json?: string | null;
       created_at: number;
       omp_message_id?: string | null;
     }>;
     return rows.map((r) => ({
       clientMessageId: r.client_message_id,
       promptText: r.prompt_text,
+      promptParts: parsePersistedPromptParts(r.prompt_parts_json),
       createdAt: r.created_at,
       ompMessageId: r.omp_message_id || undefined,
     }));
@@ -378,4 +426,3 @@ export function deletePersistedMessageIds(sessionId: string, dbPath?: string): v
     /* best-effort */
   }
 }
-

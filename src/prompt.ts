@@ -5,6 +5,7 @@ import type {
   ImageContent,
   ModelRef,
   NormalizedTurnEvent,
+  OpenCodePromptTextPart,
   ToolPartState,
   TokenBreakdown,
 } from "./providers/types";
@@ -42,6 +43,7 @@ import { isAbsolute, resolve } from "node:path";
 interface OpenCodeTextPart {
   type: "text";
   text?: string;
+  synthetic?: boolean;
 }
 
 type OpenCodePart = OpenCodeTextPart | { type: "file" | "image" | string; [key: string]: unknown } | Record<string, unknown>;
@@ -137,8 +139,9 @@ function isTextPart(value: unknown): value is OpenCodeTextPart {
   const t = value.type;
   if (t !== "text") return false;
   if ("text" in value) {
-    return typeof value.text === "string";
+    if (typeof value.text !== "string") return false;
   }
+  if ("synthetic" in value && typeof value.synthetic !== "boolean") return false;
   return true;
 }
 
@@ -300,15 +303,18 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
   return images;
 }
 
-function extractPromptText(body: PromptBody): string {
-  if (!Array.isArray(body.parts)) return "";
-  const texts: string[] = [];
+function extractPromptTextParts(body: PromptBody): OpenCodePromptTextPart[] {
+  if (!Array.isArray(body.parts)) return [];
+  const parts: OpenCodePromptTextPart[] = [];
   for (const part of body.parts) {
     if (isTextPart(part) && part.text) {
-      texts.push(part.text);
+      parts.push({
+        text: part.text,
+        ...(part.synthetic === true ? { synthetic: true } : {}),
+      });
     }
   }
-  return texts.join("\n\n");
+  return parts;
 }
 
 function makeMessageId(openCodeId: string, suffix?: string): string {
@@ -714,7 +720,12 @@ export async function promptSessionAsync(
     return { queued: false, error: "invalid body", status: 400 };
   }
 
-  const promptText = extractPromptText(body);
+  const promptTextParts = extractPromptTextParts(body);
+  const promptText = promptTextParts.map((part) => part.text).join("\n\n");
+  const visiblePromptText = promptTextParts
+    .filter((part) => part.synthetic !== true)
+    .map((part) => part.text)
+    .join("\n\n");
   const images = await extractPromptImages(body, cwd);
   if (!promptText && images.length === 0) {
     return { queued: false, error: "no text parts", status: 400 };
@@ -754,7 +765,12 @@ export async function promptSessionAsync(
     }
 
     if (parentMessageID) {
-      backendForSession(openCodeId).store.recordUserMessage?.(openCodeId, promptText, parentMessageID);
+      backendForSession(openCodeId).store.recordUserMessage?.(
+        openCodeId,
+        promptText,
+        parentMessageID,
+        promptTextParts,
+      );
       const userMsgTime = Date.now() - 1;
       emitMessageUpdated(
         {
@@ -775,11 +791,7 @@ export async function promptSessionAsync(
         cwd,
       );
 
-      let textPartIndex: number | undefined;
-      let nextPartIndex = 0;
-      if (promptText) {
-        textPartIndex = nextPartIndex++;
-      }
+      let nextPartIndex = promptTextParts.length;
 
       // Emit file/image parts before text parts so OpenChamber's event-reducer
       // replaces optimistic file parts in place (it gates optimistic part replacement
@@ -812,13 +824,14 @@ export async function promptSessionAsync(
         }
       }
 
-      if (promptText && textPartIndex !== undefined) {
+      for (const [index, part] of promptTextParts.entries()) {
         emitMessagePartUpdated(
           openCodeId,
           {
-            id: `part_${openCodeId}_${parentMessageID}_${textPartIndex}`,
+            id: `part_${openCodeId}_${parentMessageID}_${index}`,
             type: "text",
-            text: promptText,
+            text: part.text,
+            ...(part.synthetic === true ? { synthetic: true } : {}),
             messageID: parentMessageID,
             sessionID: openCodeId,
           },
@@ -861,14 +874,14 @@ export async function promptSessionAsync(
         await state.conn.prompt(promptPayload);
         await completion;
 
-        if (promptText && !isLowSignalTitleInput(promptText)) {
+        if (visiblePromptText && !isLowSignalTitleInput(visiblePromptText)) {
           (async () => {
             try {
               const backend = backendForSession(openCodeId);
               const session = await backend.store.get(openCodeId, cwd);
               if (session && (!session.title || session.title.startsWith("Session "))) {
                 if (backend.capabilities.titleGeneration) {
-                  const titleCandidate = normalizeGeneratedTitle(promptText, promptText);
+                  const titleCandidate = normalizeGeneratedTitle(visiblePromptText, visiblePromptText);
                   if (titleCandidate) {
                     await backend.store.setTitle(openCodeId, titleCandidate, "auto", cwd);
                   }

@@ -133,7 +133,7 @@ const info = (e: { properties: Record<string, unknown> }) =>
     time?: { created: number; completed?: number };
   };
 const part = (e: { properties: Record<string, unknown> }) =>
-  e.properties.part as { type?: string; text?: string; sessionID?: string };
+  e.properties.part as { type?: string; text?: string; synthetic?: boolean; sessionID?: string };
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -232,6 +232,39 @@ describe("promptSessionAsync orchestration", () => {
 
     expect(events.filter((e) => e.type === "session.idle")).toHaveLength(1);
     expect(t.kills).toBe(0);
+  });
+
+  test("keeps synthetic prompt text as a separate user part", async () => {
+    installFakeFactory();
+    const { openCodeId, cwd, sessionPath } = newSession();
+    const { events, stop } = captureEvents();
+    const syntheticText = "<system-reminder>Goal mode is active.</system-reminder>";
+
+    const res = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+      messageID: "msg_goal",
+      parts: [
+        { type: "text", text: "Review the docs." },
+        { type: "text", text: syntheticText, synthetic: true },
+      ],
+    });
+    expect(res).toEqual({ queued: true });
+
+    const t = lastTransport();
+    await waitFor(() => t.requestCount("prompt") === 1);
+    expect(t.requests.at(-1)?.params).toEqual({
+      message: `Review the docs.\n\n${syntheticText}`,
+    });
+
+    const userParts = events
+      .filter((event) => event.type === "message.part.updated")
+      .map(part);
+    expect(userParts).toHaveLength(2);
+    expect(userParts[0]).toMatchObject({ type: "text", text: "Review the docs." });
+    expect(userParts[0].synthetic).toBeUndefined();
+    expect(userParts[1]).toMatchObject({ type: "text", text: syntheticText, synthetic: true });
+
+    await completePrompt(t, openCodeId, cwd);
+    stop();
   });
 
   test("second prompt on a busy session returns 409 and reuses the transport", async () => {

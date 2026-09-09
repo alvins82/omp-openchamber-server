@@ -18,6 +18,7 @@ import type {
   ModelRef,
   NormalizedTurnEvent,
   OpenCodeMessageRecord,
+  OpenCodePromptTextPart,
   OpenCodeProvidersResponse,
   OpenCodeSession,
   SessionUpdateInput,
@@ -58,8 +59,14 @@ function emptyTokens(): OpenCodeSession["tokens"] {
   return { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
 }
 
-function userMessageRecord(openCodeId: string, text: string, messageId?: string): OpenCodeMessageRecord {
+function userMessageRecord(
+  openCodeId: string,
+  text: string,
+  messageId?: string,
+  promptParts?: OpenCodePromptTextPart[],
+): OpenCodeMessageRecord {
   const id = messageId ?? `msg_fake_u${++turnCounter}`;
+  const parts = promptParts && promptParts.length > 0 ? promptParts : [{ text }];
   return {
     info: {
       id,
@@ -69,7 +76,14 @@ function userMessageRecord(openCodeId: string, text: string, messageId?: string)
       model: { providerID: fakeModel.providerID, modelID: fakeModel.modelID, variant: fakeModel.variant },
       time: { created: Date.now() },
     },
-    parts: [{ id: `prt_${id}`, type: "text", text, messageID: id, sessionID: openCodeId }],
+    parts: parts.map((part, index) => ({
+      id: `prt_${id}_${index}`,
+      type: "text" as const,
+      text: part.text,
+      ...(part.synthetic === true ? { synthetic: true } : {}),
+      messageID: id,
+      sessionID: openCodeId,
+    })),
   };
 }
 
@@ -176,8 +190,13 @@ const fakeStore = {
     return entry ? entry.messages.map((record) => structuredClone(record)) : null;
   },
 
-  recordUserMessage(openCodeId: string, text: string, messageId?: string): void {
-    sessions.get(openCodeId)?.messages.push(userMessageRecord(openCodeId, text, messageId));
+  recordUserMessage(
+    openCodeId: string,
+    text: string,
+    messageId?: string,
+    promptParts?: OpenCodePromptTextPart[],
+  ): void {
+    sessions.get(openCodeId)?.messages.push(userMessageRecord(openCodeId, text, messageId, promptParts));
   },
 };
 

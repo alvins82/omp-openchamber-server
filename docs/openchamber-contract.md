@@ -92,6 +92,10 @@ interface MessageRecord {
    }
    ```
 
+   User text parts may also include `"synthetic": true`. Keep synthetic parts
+   separate and preserve the flag. OpenChamber uses it to hide context-only
+   reminders, such as the goal-mode reminder, from the visible transcript.
+
 2. **Reasoning Part (`type: "reasoning"`)**:
    ```json
    {

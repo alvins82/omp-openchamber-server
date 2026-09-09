@@ -144,9 +144,16 @@ export interface OpenCodeTextPart {
   id: string;
   type: "text" | "reasoning";
   text: string;
+  synthetic?: boolean;
   time?: { start: number; end?: number };
   messageID: string;
   sessionID: string;
+}
+
+/** Text parts received in an OpenCode prompt before the sidecar assigns IDs. */
+export interface OpenCodePromptTextPart {
+  text: string;
+  synthetic?: boolean;
 }
 
 export interface OpenCodeFilePart {
@@ -327,7 +334,12 @@ export interface SessionStore {
   transcript(openCodeId: string, cwd: string): Promise<OpenCodeMessageRecord[] | null>;
   /** Called before dispatching a turn (cache invalidation hooks). */
   beforeTurn?(openCodeId: string, cwd: string): void;
-  recordUserMessage?(openCodeId: string, text: string, messageId?: string): void;
+  recordUserMessage?(
+    openCodeId: string,
+    text: string,
+    messageId?: string,
+    parts?: OpenCodePromptTextPart[],
+  ): void;
   getTodos?(openCodeId: string, cwd: string): Promise<OpenCodeTodo[] | undefined>;
 }
 

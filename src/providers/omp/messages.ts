@@ -9,7 +9,15 @@ import {
 } from "../../title-db";
 import { normalizeToolInput, normalizeToolOutput } from "../../tool-normalize";
 import { resolveImageDataUrl, isBlobRef } from "../../blobs";
-import type { OpenCodeFilePart, OpenCodeMessageRecord, OpenCodePart, OpenCodeTextPart, OpenCodeToolPart, TokenBreakdown } from "../types";
+import type {
+  OpenCodeFilePart,
+  OpenCodeMessageRecord,
+  OpenCodePart,
+  OpenCodePromptTextPart,
+  OpenCodeTextPart,
+  OpenCodeToolPart,
+  TokenBreakdown,
+} from "../types";
 export interface UsageMappingResult {
   tokens: TokenBreakdown;
   cost: number;
@@ -485,11 +493,29 @@ function buildParts(
   return parts;
 }
 
+function buildPromptTextParts(
+  promptParts: OpenCodePromptTextPart[],
+  openCodeId: string,
+  messageId: string,
+  timestamp: number,
+): OpenCodeTextPart[] {
+  return promptParts.map((part, index) => ({
+    id: `part_${openCodeId}_${messageId}_${index}`,
+    type: "text",
+    text: part.text,
+    ...(part.synthetic === true ? { synthetic: true } : {}),
+    time: { start: timestamp, end: timestamp },
+    messageID: messageId,
+    sessionID: openCodeId,
+  }));
+}
+
 interface RecordedUserMessage {
   text: string;
   clientMessageId: string;
   timestamp: number;
   ompMessageId?: string;
+  promptParts?: OpenCodePromptTextPart[];
 }
 
 const recordedUserMessagesBySession = new Map<string, RecordedUserMessage[]>();
@@ -507,16 +533,22 @@ export function recordUserMessageId(
   promptTextOrMessageId: string,
   messageId?: string,
   dbPath?: string,
+  promptParts?: OpenCodePromptTextPart[],
 ): void {
   const actualMessageId = messageId ?? promptTextOrMessageId;
   const promptText = messageId ? promptTextOrMessageId : "";
   const now = Date.now();
   const list = recordedUserMessagesBySession.get(openCodeId) ?? [];
   const filtered = list.filter((item) => item.clientMessageId !== actualMessageId);
-  filtered.push({ text: promptText.trim(), clientMessageId: actualMessageId, timestamp: now });
+  filtered.push({
+    text: promptText.trim(),
+    clientMessageId: actualMessageId,
+    timestamp: now,
+    ...(promptParts && promptParts.length > 0 ? { promptParts: promptParts.map((part) => ({ ...part })) } : {}),
+  });
   recordedUserMessagesBySession.set(openCodeId, filtered);
 
-  recordPersistedMessageId(openCodeId, actualMessageId, promptText.trim(), now, undefined, dbPath);
+  recordPersistedMessageId(openCodeId, actualMessageId, promptText.trim(), now, undefined, dbPath, promptParts);
 }
 
 function getRecordedUserMessages(openCodeId: string, dbPath?: string): RecordedUserMessage[] {
@@ -532,6 +564,7 @@ function getRecordedUserMessages(openCodeId: string, dbPath?: string): RecordedU
       clientMessageId: p.clientMessageId,
       timestamp: p.createdAt,
       ompMessageId: p.ompMessageId,
+      promptParts: p.promptParts,
     }));
     recordedUserMessagesBySession.set(openCodeId, list);
     return list;
@@ -646,7 +679,10 @@ export function mapRpcMessagesToOpenCodeRecords(
 
       userMessageIndex++;
       visibleIndex++;
-      const parts = buildParts(msg, openCodeId, messageId);
+      const matchedPromptParts = matchedIndex !== -1 ? recordedList[matchedIndex].promptParts : undefined;
+      const parts = matchedPromptParts && matchedPromptParts.length > 0
+        ? buildPromptTextParts(matchedPromptParts, openCodeId, messageId, createdAt)
+        : buildParts(msg, openCodeId, messageId);
       const baseInfo: OpenCodeMessageRecord["info"] = {
         id: messageId,
         role: "user",

@@ -201,8 +201,8 @@ const ompStore: SessionStore = {
   beforeTurn(openCodeId, cwd) {
     invalidateMessageCache(openCodeId, cwd);
   },
-  recordUserMessage(openCodeId, text, messageId) {
-    recordUserMessageId(openCodeId, text, messageId);
+  recordUserMessage(openCodeId, text, messageId, parts) {
+    recordUserMessageId(openCodeId, text, messageId, undefined, parts);
   },
 };
 
