@@ -68,6 +68,36 @@ function readBundledVersion(binaryPath: string, env: Environment): string | null
   }
 }
 
+function readConfiguredVersion(env: Environment): string | null {
+  const explicit = env.OMP_VERSION?.trim();
+  if (explicit) return explicit;
+
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(import.meta.dir, "..", "..", "..", "package.json"), "utf8"),
+    ) as { ompVersion?: unknown };
+    return typeof manifest.ompVersion === "string" && manifest.ompVersion.trim()
+      ? manifest.ompVersion.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasExplicitBundleLocation(env: Environment): boolean {
+  return Boolean(env.OMP_BUNDLED_PATH?.trim() || env.OMP_BUNDLED_DIR?.trim());
+}
+
+function bundledNeedsPreparation(binaryPath: string, env: Environment): boolean {
+  // Explicit bundle locations are used by tests and local development. Leave
+  // their lifecycle under the caller's control rather than rewriting them
+  // from the sidecar source tree.
+  if (hasExplicitBundleLocation(env)) return false;
+
+  const configuredVersion = readConfiguredVersion(env);
+  return configuredVersion !== null && readBundledVersion(binaryPath, env) !== configuredVersion;
+}
+
 function readProcessOutput(stream: Bun.Subprocess["stdout"]): Promise<string> {
   if (stream === undefined || typeof stream === "number") return Promise.resolve("");
   return new Response(stream).text();
@@ -96,15 +126,16 @@ let ensurePromise: Promise<string> | undefined;
 
 /**
  * Ensure the project-owned OMP release is staged before the sidecar serves
- * requests. The preparation script owns version, target, cache, and download
- * details; this function makes startup enforce that contract.
+ * requests. Startup validates the staged binary against the configured
+ * package pin and prepares that exact release when the pin has changed or the
+ * binary is missing.
  */
 export function ensureOmpBinary(env: Environment = currentEnvironment()): Promise<string> {
   const explicit = env.OMP_BIN?.trim();
   if (explicit) return Promise.resolve(explicit);
 
   const bundled = bundledCandidates(env).find(isExecutable);
-  if (bundled) return Promise.resolve(bundled);
+  if (bundled && !bundledNeedsPreparation(bundled, env)) return Promise.resolve(bundled);
 
   ensurePromise ??= (async () => {
     try {

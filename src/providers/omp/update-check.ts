@@ -97,7 +97,7 @@ export function startOmpUpdateChecker(): () => void {
       lastReportedVersion = result.latestVersion;
       logger.warn(
         `[sidecar] OMP update available: ${result.currentVersion} → ${result.latestVersion}. `
-        + "Bump sidecar/package.json ompVersion and run `bun run prepare:omp`.",
+        + "Bump sidecar/package.json ompVersion and restart the sidecar to stage it.",
       );
     } catch (error) {
       logger.debug({ err: error }, "[sidecar] OMP update check failed");

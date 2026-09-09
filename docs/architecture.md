@@ -63,7 +63,7 @@ The adapter seam that lets the sidecar serve multiple agent backends behind one 
 
 ### 5. OMP RPC Process Manager (`src/providers/omp/rpc.ts`)
 - Spawns and manages `omp --mode rpc` child processes communicating via newline-delimited JSON (NDJSON) over standard I/O.
-- Ensures the project-owned `resources/omp` binary exists before the HTTP server starts, downloading the pinned platform-specific OMP release when it is missing.
+- Ensures the project-owned `resources/omp` binary matches the `ompVersion` pin before the HTTP server starts, downloading that exact platform-specific release when it is missing or stale.
 - Resolves `OMP_BIN` only as an explicit test/development override; otherwise it uses the staged project-owned binary and never searches PATH or common install directories.
 - **Persistent Children**: Maintained per `(sessionID, directory)` pair for conversational prompt turns.
 - **Ephemeral Children**: Spawned on-demand with automatic teardown for one-shot commands (e.g. `/config/providers`).
@@ -72,7 +72,7 @@ The adapter seam that lets the sidecar serve multiple agent backends behind one 
   - Spawns children in detached process groups so parent termination cleanly tears down all descendant processes.
   - Overlays `mcp.enableProjectConfig: false` for the embedded instance to prevent project-level MCP deadlock.
   - Passes `PI_SKIP_VERSION_CHECK=1` to eliminate update check network delays.
-  - Performs a non-blocking OMP release check after startup and every four hours; it reports newer releases but does not replace the running pinned binary.
+  - Performs a non-blocking OMP release check after startup and every four hours; it reports newer releases but does not replace the running pinned binary. Bumping `ompVersion` in `package.json` is the explicit opt-in, and the next startup stages that exact version automatically.
 
 ### 6. Event Translation & SSE Stream (`src/prompt.ts`, `src/sse.ts`)
 - Subscribes to OMP internal turn events (`message_update`, `tool_execution_*`, `turn_end`, `agent_end`).
