@@ -75,6 +75,7 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
       { path: "api/config/settings", method: "GET", expectedStatus: 200 },
       { path: "api/config/themes", method: "GET", expectedStatus: 200 },
       { path: "config/themes", method: "GET", expectedStatus: 200 },
+      { path: "api/linear/auth/status", method: "GET", expectedStatus: 200 },
       { path: "api/opencode/upgrade-status", method: "GET", expectedStatus: 200 },
     ];
 
@@ -84,6 +85,9 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
       const json = await res.json();
       expect(json).toBeDefined();
     }
+
+    const linearStatus = await (await fetch(BASE + "api/linear/auth/status")).json();
+    expect(linearStatus).toEqual({ connected: false });
   });
 
   test("Sidecar responds to /event, /events, and /global/event SSE endpoints", async () => {

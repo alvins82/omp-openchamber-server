@@ -936,6 +936,13 @@ const MIME_TYPES: Record<string, string> = {
         return json({ authenticated: false });
       }
 
+      // Linear is not owned by the sidecar. Return the same neutral status
+      // shape as OpenChamber's server uses when no workspace is connected so
+      // the UI can hide the integration without treating it as a server error.
+      if (path === "/api/linear/auth/status" && req.method === "GET") {
+        return json({ connected: false });
+      }
+
       if (path === "/api/session-folders") {
         return json([]);
       }

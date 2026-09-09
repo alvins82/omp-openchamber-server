@@ -115,6 +115,17 @@ Pin state and delivery signatures are merged into the OpenCode session's
 prompts; the UI attaches the returned knowledge block as a synthetic prompt
 part, matching the normal OpenChamber server path.
 
+## Linear compatibility
+
+### `GET /api/linear/auth/status`
+
+Returns `{ "connected": false }` with `200 OK`. The sidecar does not store
+Linear credentials or implement Linear OAuth. This response lets OpenChamber
+treat Linear as disconnected instead of logging a missing route.
+
+Linear authorization, issue, mapping, and session-status routes are not
+implemented by the sidecar.
+
 ## Git
 
 Git routes use the local `git` executable and accept the repository directory
