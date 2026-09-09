@@ -68,6 +68,63 @@ function resolveFsPath(rawPath: string, effectiveDir = process.cwd()): string {
   return join(effectiveDir, trimmed);
 }
 
+// OpenChamber uses this bounded walk when a selected directory is not itself
+// a Git repository. Keep the scan deliberately shallow and stop at repository
+// boundaries: this is only for choosing a nested repo in the Git tab, not for
+// indexing an entire filesystem.
+const GIT_DIRS_MAX_DEPTH = 3;
+const GIT_DIRS_MAX_DIRS = 100;
+const GIT_DIRS_SKIP_NAMES = new Set(["node_modules", "dist", "build", ".venv", "target", ".next"]);
+
+async function findGitDirectories(rootPath: string): Promise<string[]> {
+  const repositories: string[] = [];
+  let visited = 0;
+
+  const walk = async (directory: string, depth: number): Promise<void> => {
+    if (visited >= GIT_DIRS_MAX_DIRS) return;
+
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (err) {
+      // A protected nested directory should not make the whole picker fail.
+      // The root is handled by the route's error mapping below.
+      if (directory === rootPath) throw err;
+      return;
+    }
+    visited += 1;
+
+    let isRepository = false;
+    const subdirectories: string[] = [];
+    for (const entry of entries) {
+      // A .git directory, worktree pointer file, or symlink all identify a
+      // repository boundary. Do not descend into that repository.
+      if (entry.name === ".git") {
+        isRepository = true;
+        continue;
+      }
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (GIT_DIRS_SKIP_NAMES.has(entry.name)) continue;
+      if (depth >= GIT_DIRS_MAX_DEPTH) continue;
+      subdirectories.push(entry.name);
+    }
+
+    if (isRepository) {
+      if (directory !== rootPath) repositories.push(directory);
+      return;
+    }
+
+    subdirectories.sort();
+    for (const name of subdirectories) {
+      if (visited >= GIT_DIRS_MAX_DIRS) break;
+      await walk(join(directory, name), depth + 1);
+    }
+  };
+
+  await walk(rootPath, 0);
+  return repositories;
+}
+
 function createProjectIdFromPath(projectPath: string): string {
   const normalized = projectPath.replace(/\\/g, "/").replace(/\/+$/g, "").trim();
   if (!normalized) return "";
@@ -525,6 +582,37 @@ const server = Bun.serve<SidecarWebSocketData>({
           });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "fs list failed", 400);
+        }
+      }
+
+      // Nested Git repository discovery used by the OpenChamber Git picker.
+      if ((path === "/fs/git-dirs" || path === "/api/fs/git-dirs") && req.method === "GET") {
+        const rawPath = url.searchParams.get("path")?.trim() || "";
+        if (!rawPath) return jsonError("Path is required", 400);
+
+        const targetDir = resolveFsPath(rawPath, effectiveDir);
+        try {
+          const s = await stat(targetDir);
+          if (!s.isDirectory()) {
+            return json({ error: "Specified path is not a directory", reason: "not-directory" }, { status: 400 });
+          }
+
+          const repositories = await findGitDirectories(targetDir);
+          return json({
+            path: targetDir,
+            repositories: repositories.map((repositoryPath) => ({
+              path: repositoryPath,
+              name: basename(repositoryPath),
+            })),
+          });
+        } catch (err: any) {
+          if (err && err.code === "ENOENT") {
+            return json({ error: "Directory not found", reason: "not-found" }, { status: 404 });
+          }
+          if (err && (err.code === "EACCES" || err.code === "EPERM")) {
+            return jsonError("Access to directory denied", 403);
+          }
+          return jsonError(err instanceof Error ? err.message : "Failed to find git directories", 500);
         }
       }
 

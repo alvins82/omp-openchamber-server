@@ -636,6 +636,39 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(delRes.status).toBe(200);
   });
 
+  test("GET /api/fs/git-dirs discovers bounded nested Git repositories", async () => {
+    const root = join(FAKE_HOME, "git-dirs-test");
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+
+    mkdirSync(join(repoA, ".git"), { recursive: true });
+    mkdirSync(join(repoB, ".git"), { recursive: true });
+    // Repository boundaries are not traversed, and common dependency/output
+    // directories are intentionally skipped by the discovery route.
+    mkdirSync(join(repoA, "nested-repo", ".git"), { recursive: true });
+    mkdirSync(join(root, "node_modules", "hidden-repo", ".git"), { recursive: true });
+
+    const response = await fetch(BASE + "api/fs/git-dirs?path=" + encodeURIComponent(root));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      path: root,
+      repositories: [
+        { path: repoA, name: "repo-a" },
+        { path: repoB, name: "repo-b" },
+      ],
+    });
+
+    const missing = await fetch(BASE + "api/fs/git-dirs?path=" + encodeURIComponent(join(root, "missing")));
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "Directory not found", reason: "not-found" });
+
+    const filePath = join(root, "not-a-directory");
+    writeFileSync(filePath, "file");
+    const notDirectory = await fetch(BASE + "api/fs/git-dirs?path=" + encodeURIComponent(filePath));
+    expect(notDirectory.status).toBe(400);
+    expect(await notDirectory.json()).toEqual({ error: "Specified path is not a directory", reason: "not-directory" });
+  });
+
   test("POST /api/opencode/directory creates directory and registers project in settings", async () => {
     const newProjDir = join(FAKE_HOME, "projects", "new-test-project");
 
