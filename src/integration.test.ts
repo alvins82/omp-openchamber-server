@@ -173,7 +173,19 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
 
     expect(await (await fetch(BASE + "mcp")).json()).toEqual({});
     expect(await (await fetch(BASE + "vcs")).json()).toEqual({ branch: "main", default_branch: "main" });
-    
+
+    const quotaResponse = await fetch(BASE + "api/quota/codex");
+    expect(quotaResponse.status).toBe(200);
+    const quota = await quotaResponse.json();
+    expect(quota).toMatchObject({
+      providerId: "codex",
+      providerName: "codex",
+      ok: false,
+      configured: false,
+      usage: null,
+    });
+    expect(typeof quota.fetchedAt).toBe("number");
+
     const commands = (await (await fetch(BASE + "command")).json()) as Array<{ name: string; description: string; template?: string }>;
     expect(commands).toBeArray();
     expect(commands.map((c) => c.name)).toContain("help");
@@ -878,4 +890,3 @@ await new Promise((r) => setTimeout(r, 60));
     expect(JSON.parse(last).customType).toBe("session_exit");
   });
 });
-

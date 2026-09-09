@@ -1992,7 +1992,19 @@ const MIME_TYPES: Record<string, string> = {
 
     if ((p.startsWith("/quota/") || p.startsWith("/api/quota/")) && req.method === "GET") {
       const providerId = p.replace(/^\/(?:api\/)?quota\//, "");
-      return json({ providerId, limit: null, used: 0 });
+      // Quota reporting is owned by the OpenChamber web server. The sidecar
+      // does not have the provider-specific credentials/API integrations, but
+      // it still needs to return the ProviderResult shape so the usage panel
+      // can render an unavailable provider instead of failing schema parsing.
+      return json({
+        providerId,
+        providerName: providerId,
+        ok: false,
+        configured: false,
+        usage: null,
+        error: "Quota reporting is unavailable through the OMP sidecar",
+        fetchedAt: Date.now(),
+      });
     }
 
     if ((p === "/github/auth/status" || p === "/api/github/auth/status") && req.method === "GET") {
