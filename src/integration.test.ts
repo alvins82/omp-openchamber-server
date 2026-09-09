@@ -792,7 +792,7 @@ await new Promise((r) => setTimeout(r, 60));
     expect(String(text.text ?? "")).toContain("Prompt failed:");
     expect(String(text.text ?? "")).toContain("403 Forbidden (mock provider)");
     const info = eventsFor(events, "message.updated", SES_A).map((e) => e.properties.info as MsgInfo);
-    expect(info[info.length - 1].finish).toBe("stop");
+    expect(info[info.length - 1].finish).toBe("error");
     expect(events[events.length - 1].type).toBe("session.idle");
   });
 
@@ -878,7 +878,4 @@ await new Promise((r) => setTimeout(r, 60));
     expect(JSON.parse(last).customType).toBe("session_exit");
   });
 });
-
-
-
 

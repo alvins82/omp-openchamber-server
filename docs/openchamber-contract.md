@@ -50,6 +50,12 @@ data: {"type":"<eventType>","properties":{...}}
    - `message.updated`: Finalizes the message (`finish: "stop"`).
    - `session.status` (`idle`): Signals turn completion and releases UI locks.
 
+Provider and transport failures use a terminal `message.updated` with
+`finish: "error"` and `info.error`, followed by `session.error` and
+`session.idle`. If OMP sends both a terminal event and a failed RPC
+acknowledgement, the terminal event wins and the sidecar emits no second
+assistant completion.
+
 ---
 
 ## 3. Message & Part Data Structures

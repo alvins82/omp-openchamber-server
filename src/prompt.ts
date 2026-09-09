@@ -841,6 +841,7 @@ export async function promptSessionAsync(
     }
 
     (async () => {
+      let completed = false;
       try {
         if (modelRef) {
           try {
@@ -852,7 +853,6 @@ export async function promptSessionAsync(
 
         const { promise: completion, resolve: markComplete } = Promise.withResolvers<void>();
 
-        let completed = false;
         const complete = () => {
           if (completed) return;
           completed = true;
@@ -893,11 +893,31 @@ export async function promptSessionAsync(
           })();
         }
       } catch (err) {
+        // A terminal event is authoritative even if the RPC acknowledgement
+        // fails afterward. Do not append a second assistant message that can
+        // overwrite a provider error (or a successful terminal message) in
+        // OpenChamber's event reducer.
+        if (completed) {
+          promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} acknowledgement failed after completion`);
+          return;
+        }
         const messageID = makeMessageId(openCodeId, `error_${Date.now()}`);
         const errorModel = state.currentModel;
         emitSessionError(openCodeId, err, cwd);
-        emitAssistantInfo(openCodeId, messageID, parentMessageID, errorModel, "stop", cwd);
-        emitAssistantPart(openCodeId, messageID, makePartId(openCodeId, messageID, 0), "text", `Prompt failed: ${err instanceof Error ? err.message : String(err)}`);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        emitAssistantInfo(
+          openCodeId,
+          messageID,
+          parentMessageID,
+          errorModel,
+          "error",
+          cwd,
+          undefined,
+          undefined,
+          undefined,
+          { message: errorMessage },
+        );
+        emitAssistantPart(openCodeId, messageID, makePartId(openCodeId, messageID, 0), "text", `Prompt failed: ${errorMessage}`);
         promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} failed`);
       } finally {
         state.unsubscribe();

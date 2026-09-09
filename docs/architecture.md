@@ -72,6 +72,7 @@ The adapter seam that lets the sidecar serve multiple agent backends behind one 
   - Spawns children in detached process groups so parent termination cleanly tears down all descendant processes.
   - Overlays `mcp.enableProjectConfig: false` for the embedded instance to prevent project-level MCP deadlock.
   - Passes `PI_SKIP_VERSION_CHECK=1` to eliminate update check network delays.
+  - Performs a non-blocking OMP release check after startup and every four hours; it reports newer releases but does not replace the running pinned binary.
 
 ### 6. Event Translation & SSE Stream (`src/prompt.ts`, `src/sse.ts`)
 - Subscribes to OMP internal turn events (`message_update`, `tool_execution_*`, `turn_end`, `agent_end`).

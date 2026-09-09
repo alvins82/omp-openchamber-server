@@ -35,6 +35,7 @@ import {
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
 import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
 import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion } from "./providers/omp/binary";
+import { startOmpUpdateChecker } from "./providers/omp/update-check";
 import type { OpenCodeProvidersResponse } from "./providers/types";
 import { logger, httpLogger } from "./logger";
 import { join, isAbsolute, basename, extname } from "node:path";
@@ -2072,6 +2073,7 @@ function logStartupBanner(port?: number): void {
 
 logStartupBanner(server.port);
 messageQueueRuntime.start();
+const stopOmpUpdateChecker = startOmpUpdateChecker();
 
 // Keepalive interval so Bun's event loop wakes up frequently to process POSIX signals
 // (SIGINT/SIGTERM) immediately even when Bun.serve has no pending I/O.
@@ -2086,6 +2088,7 @@ function handleShutdownSignal(signal: string) {
   }
   shuttingDown = true;
   clearInterval(signalKeepalive);
+  stopOmpUpdateChecker();
   try {
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
       process.stdin.setRawMode(false);

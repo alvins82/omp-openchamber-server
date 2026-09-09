@@ -22,7 +22,7 @@
     "check": "bun run --bun tsc --noEmit",
     "test:live": "OC_LIVE=1 bun test src/integration.live.test.ts"
   },
-  "ompVersion": "18.1.15",
+  "ompVersion": "18.1.16",
   "type": "module",
   "dependencies": {
     "pino": "^10.3.1",

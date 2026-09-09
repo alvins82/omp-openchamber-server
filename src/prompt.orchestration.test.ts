@@ -128,6 +128,7 @@ const info = (e: { properties: Record<string, unknown> }) =>
     role?: string;
     model?: { id?: string; providerID?: string; modelID?: string; variant?: string };
     finish?: string;
+    error?: unknown;
     tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
     cost?: number;
     time?: { created: number; completed?: number };
@@ -328,6 +329,41 @@ describe("promptSessionAsync orchestration", () => {
     const parts = events.filter((e) => e.type === "message.part.updated");
     expect(parts).toHaveLength(1);
     expect(part(parts[0]).text).toBe("Prompt failed: model down");
+    const messages = events.filter((e) => e.type === "message.updated");
+    expect(info(messages[messages.length - 1]).finish).toBe("error");
+    expect(info(messages[messages.length - 1]).error).toEqual({ message: "model down" });
+    expect(events.filter((e) => e.type === "session.error")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "session.idle")).toHaveLength(1);
+  });
+
+  test("does not append an RPC failure after a terminal provider error event", async () => {
+    installFakeFactory();
+    const { openCodeId, cwd, sessionPath } = newSession();
+    const { events, stop } = captureEvents();
+
+    const res = await promptSessionAsync(openCodeId, cwd, sessionPath, { parts: [{ type: "text", text: "go" }] });
+    expect(res.queued).toBe(true);
+    const t = lastTransport();
+    await waitFor(() => t.requestCount("prompt") === 1);
+
+    t.fire({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorStatus: 400,
+        errorMessage: "context limit",
+      },
+    });
+    t.promptSettler()?.reject(new Error("RPC prompt: context limit"));
+    await waitFor(() => !isSessionBusy(openCodeId, cwd), 1000);
+    stop();
+
+    const messages = events.filter((e) => e.type === "message.updated");
+    expect(messages).toHaveLength(2);
+    expect(info(messages[messages.length - 1]).finish).toBe("error");
+    expect(info(messages[messages.length - 1]).error).toEqual({ message: "context limit" });
+    expect(events.filter((e) => e.type === "message.part.updated")).toHaveLength(1);
     expect(events.filter((e) => e.type === "session.error")).toHaveLength(1);
     expect(events.filter((e) => e.type === "session.idle")).toHaveLength(1);
   });

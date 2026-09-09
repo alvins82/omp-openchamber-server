@@ -22,6 +22,8 @@ omp --mode rpc --cwd <directory> --no-title --no-pty
   - `PI_SKIP_VERSION_CHECK=1`: Disables startup network update checks.
   - `--config {"mcp":{"enableProjectConfig":false}}`: Prevents third-party project MCP server hangs on embedded helper instances.
 
+The sidecar separately checks the latest stable OMP release after startup and every four hours. This check only reports availability; updating remains a deliberate staging operation so active OMP sessions are not replaced underneath the server.
+
 ---
 
 ## 2. Core RPC Commands
