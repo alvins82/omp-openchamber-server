@@ -3,6 +3,9 @@ import {
   attachOpenCodeEventWebSocket,
   createOpenChamberNotificationStream,
   emitOpenCodeEvent,
+  emitSessionCompacted,
+  emitSessionCompactionStarted,
+  subscribeOpenCodeEvents,
 } from "./sse";
 
 class FakeSocket {
@@ -66,5 +69,32 @@ describe("browser realtime adapters", () => {
     expect(notificationSeen).toBe(true);
 
     await reader.cancel();
+  });
+});
+
+describe("compaction events", () => {
+  test("emitSessionCompactionStarted and emitSessionCompacted broadcast expected event payloads", () => {
+    const seen: unknown[] = [];
+    const unsubscribe = subscribeOpenCodeEvents((evt) => seen.push(evt));
+    emitSessionCompactionStarted("ses_123", "/workspace");
+    emitSessionCompacted("ses_123", "/workspace");
+    unsubscribe();
+
+    expect(seen).toHaveLength(3);
+    expect(seen[0]).toEqual({
+      type: "session.next.compaction.started",
+      properties: { sessionID: "ses_123" },
+      directory: "/workspace",
+    });
+    expect(seen[1]).toEqual({
+      type: "session.compacted",
+      properties: { sessionID: "ses_123" },
+      directory: "/workspace",
+    });
+    expect(seen[2]).toEqual({
+      type: "session.next.compaction.ended",
+      properties: { sessionID: "ses_123" },
+      directory: "/workspace",
+    });
   });
 });

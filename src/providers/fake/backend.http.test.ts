@@ -170,9 +170,12 @@ describe("multi-backend HTTP surface (OC_FAKE_BACKEND=1)", () => {
     expect(todos.status).toBe(200);
     expect(await todos.json()).toEqual([]);
 
-    // summarize gate: capabilities.compact false -> 501
+    // summarize / compact gate: capabilities.compact false -> 501
     const summarize = await postJson(`session/${fakeId}/summarize`, {});
     expect(summarize.status).toBe(501);
+
+    const compact = await postJson(`session/${fakeId}/compact`, {});
+    expect(compact.status).toBe(501);
 
     // shell gate: capabilities.shell false -> 400
     const shell = await postJson(`session/${fakeId}/shell`, { command: "echo hi" });

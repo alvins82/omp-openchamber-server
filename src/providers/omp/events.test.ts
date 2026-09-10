@@ -58,13 +58,13 @@ interface Harness {
 
 const SES = "ses_omp_test0000000000000000000000000000000000000000000000000000";
 
-function createHarness(opts?: { initialModel?: ModelRef }): Harness {
+function createHarness(opts?: { initialModel?: ModelRef; nonTerminalGraceMs?: number }): Harness {
   const transport = new ScriptedTransport();
   const normalizer = createOmpEventNormalizer({
     transport,
     openCodeId: SES,
     cwd: "/tmp/omp-events-test",
-    nonTerminalGraceMs: 10,
+    nonTerminalGraceMs: opts?.nonTerminalGraceMs ?? 10,
     ...(opts?.initialModel ? { initialModel: opts.initialModel } : {}),
   });
   const events: NormalizedTurnEvent[] = [];
@@ -482,7 +482,7 @@ describe("subscribe lifecycle", () => {
 
 describe("constants", () => {
   test("exported defaults", () => {
-    expect(DEFAULT_NON_TERMINAL_GRACE_MS).toBe(1500);
+    expect(DEFAULT_NON_TERMINAL_GRACE_MS).toBe(180_000);
     expect(OMP_DEFAULT_MODEL).toEqual({ providerID: "omp", modelID: "omp", variant: "default" });
   });
 });
@@ -504,5 +504,51 @@ describe("reduceToolPartState", () => {
     const after = reduceToolPartState(done, { type: "tool_execution_update", output: "late" }, 2, "bash");
     expect(after.status).toBe("completed");
     expect(after.output).toBeUndefined();
+  });
+});
+
+describe("compaction events", () => {
+  test("auto_compaction_start and auto_compaction_end frames emit normalized events and clear non-terminal grace timer", async () => {
+    const h = createHarness({ nonTerminalGraceMs: 50 });
+    const seen: NormalizedTurnEvent[] = [];
+    h.normalizer.subscribe((e) => seen.push(e));
+
+    // Feed non-terminal agent_end (starts 50ms grace timer)
+    h.feed({ type: "agent_end", isTerminal: false } as unknown as OmpRpcEvent);
+
+    // auto_compaction_start arrives before timer expires -> cancels timer and emits compaction_start
+    h.feed({
+      type: "auto_compaction_start",
+      reason: "threshold",
+      action: "context-full",
+    } as unknown as OmpRpcEvent);
+
+    // Wait 60ms to confirm the timer did NOT fire turn_end
+    await new Promise((r) => setTimeout(r, 60));
+    expect(kinds(seen)).toEqual(["compaction_start"]);
+    expect(seen[0]).toEqual({
+      kind: "compaction_start",
+      reason: "threshold",
+      action: "context-full",
+    });
+
+    // auto_compaction_end arrives -> emits compaction_end
+    h.feed({
+      type: "auto_compaction_end",
+      aborted: false,
+      willRetry: false,
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(seen)).toEqual(["compaction_start", "compaction_end"]);
+    expect(seen[1]).toEqual({
+      kind: "compaction_end",
+      aborted: false,
+      willRetry: false,
+    });
+  });
+
+  test("isRpcEventFrame recognizes auto_compaction_start and auto_compaction_end", () => {
+    expect(isRpcEventFrame({ type: "auto_compaction_start" })).toBe(true);
+    expect(isRpcEventFrame({ type: "auto_compaction_end" })).toBe(true);
   });
 });

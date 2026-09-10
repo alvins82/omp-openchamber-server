@@ -385,3 +385,12 @@ export function emitQuestionRejected(
 ): void {
   emitOpenCodeEvent("question.rejected", { sessionID, questionID }, directory);
 }
+
+export function emitSessionCompactionStarted(sessionID: string, directory?: string): void {
+  emitOpenCodeEvent("session.next.compaction.started", { sessionID }, directory);
+}
+
+export function emitSessionCompacted(sessionID: string, directory?: string): void {
+  emitOpenCodeEvent("session.compacted", { sessionID }, directory);
+  emitOpenCodeEvent("session.next.compaction.ended", { sessionID }, directory);
+}

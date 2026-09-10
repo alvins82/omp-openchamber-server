@@ -916,4 +916,78 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out![1].parts[4].type).toBe("text");
     expect((out![1].parts[4] as any).text).toBe("Goal complete: application built and verified.");
   });
+
+  it("parses compaction entries as assistant messages with summary = true", async () => {
+    const compactSid = "sess-compaction-test-uuid";
+    const path = fileFor("compaction-session.jsonl", [
+      userMsg("u1", "First prompt", 1755927600000),
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "2026-08-23T00:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Pre-compaction assistant answer" }],
+          stopReason: "stop",
+          timestamp: 1755927601000,
+        },
+      },
+      {
+        type: "compaction",
+        id: "cmp1",
+        parentId: "a1",
+        timestamp: "2026-08-23T00:00:02.000Z",
+        summary: "## Summary of previous conversation\nKey facts preserved.",
+        firstKeptEntryId: "u1",
+        tokensBefore: 60000,
+        tokensAfter: 25000,
+        method: "handoff",
+      },
+      {
+        type: "message",
+        id: "a2",
+        timestamp: "2026-08-23T00:00:03.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Post-compaction continuation" }],
+          stopReason: "stop",
+          timestamp: 1755927603000,
+        },
+      },
+    ]);
+
+    const out = await loadMessagesFromFile(path, compactSid, TEST_DB);
+    expect(out).toHaveLength(4);
+
+    // 0: user message
+    expect(out![0].info.role).toBe("user");
+
+    // 1: pre-compaction assistant
+    expect(out![1].info.role).toBe("assistant");
+    expect(out![1].info.summary).toBeUndefined();
+    expect(out![1].parts[0]).toMatchObject({ type: "text", text: "Pre-compaction assistant answer" });
+
+    // 2: compaction checkpoint
+    const compactRecord = out![2];
+    expect(compactRecord.info.role).toBe("assistant");
+    expect(compactRecord.info.summary).toBe(true);
+    expect(compactRecord.info.agent).toBe("compaction");
+    expect(compactRecord.info.finish).toBe("stop");
+    expect(compactRecord.info.tokens).toEqual({
+      input: 60000,
+      output: 25000,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    });
+    expect(compactRecord.parts).toHaveLength(1);
+    expect(compactRecord.parts[0]).toMatchObject({
+      type: "text",
+      text: "## Summary of previous conversation\nKey facts preserved.",
+    });
+
+    // 3: post-compaction assistant is NOT collated into compaction
+    expect(out![3].info.role).toBe("assistant");
+    expect(out![3].info.summary).toBeUndefined();
+    expect(out![3].parts[0]).toMatchObject({ type: "text", text: "Post-compaction continuation" });
+  });
 });

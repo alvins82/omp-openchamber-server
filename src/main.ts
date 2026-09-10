@@ -11,6 +11,7 @@ import {
   emitQuestionReplied,
   emitQuestionRejected,
   emitBrowserControlRequest,
+  emitSessionCompacted,
 } from "./sse";
 import { BrowserControlBroker, BrowserControlError } from "./browser-control";
 import {
@@ -33,6 +34,7 @@ import {
   shutdownAll,
 } from "./prompt";
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
+import { invalidateMessageCache } from "./providers/omp/messages";
 import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
 import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion, setExplicitOmpBinary } from "./providers/omp/binary";
 import { startOmpUpdateChecker } from "./providers/omp/update-check";
@@ -1460,16 +1462,18 @@ const MIME_TYPES: Record<string, string> = {
       }
     }
 
-    // Session summarize
-    const summarizeMatch = p.match(/^\/session\/([^/]+)\/summarize$/);
-    if (summarizeMatch && req.method === "POST") {
+    // Session summarize / compact
+    const compactMatch = p.match(/^(?:\/api)?\/session\/([^/]+)\/(?:summarize|compact)$/);
+    if (compactMatch && req.method === "POST") {
       try {
-        const { backend, session } = await resolveSessionRoute(summarizeMatch[1], dir);
+        const { backend, session } = await resolveSessionRoute(compactMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
         if (!backend.capabilities.compact) return jsonError("summarize not supported by backend", 501);
         await withOmpRpc(session.directory, async (conn) => {
           await conn.request("compact", {});
         }).catch(() => {});
+        invalidateMessageCache(session.id, session.directory);
+        emitSessionCompacted(session.id, session.directory);
         return json(true);
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "summarize failed", 500);

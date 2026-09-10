@@ -207,6 +207,7 @@ export interface OpenCodeMessageRecord {
     };
     finish?: string;
     error?: unknown;
+    summary?: boolean;
     time: { created: number; completed?: number };
   };
   parts: Array<OpenCodeTextPart | OpenCodeToolPart | OpenCodeFilePart>;
@@ -270,6 +271,8 @@ export type NormalizedTurnEvent =
   | { kind: "subagent_ended"; childId: string }
   | { kind: "subagent_status"; childId: string; status: SubagentStatus }
   | { kind: "todo"; todos: OpenCodeTodo[] }
+  | { kind: "compaction_start"; reason?: string; action?: string }
+  | { kind: "compaction_end"; aborted?: boolean; willRetry?: boolean }
   | { kind: "turn_end"; error?: string; stopReason?: string };
 
 // ---------------------------------------------------------------------------

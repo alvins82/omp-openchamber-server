@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import type { ModelRef, NormalizedTurnEvent, ToolPartState, TokenBreakdown } from "../types";
-import { mapOmpUsageToTokens } from "./messages";
+import { invalidateMessageCache, mapOmpUsageToTokens } from "./messages";
 import { readSessionHeader, readSessionIdSync, toOpenCodeSessionId } from "./store";
 import { extractTodosFromOmpDetails, isTodoTool } from "./todo";
 import type { OmpRpcEvent, OmpRpcTransport } from "./rpc";
@@ -33,6 +33,8 @@ export function isRpcEventFrame(obj: Record<string, unknown>): boolean {
     obj.type === "agent_end" ||
     obj.type === "turn_start" ||
     obj.type === "turn_end" ||
+    obj.type === "auto_compaction_start" ||
+    obj.type === "auto_compaction_end" ||
     obj.type === "custom"
   )) return true;
   if (typeof obj.customType === "string") return true;
@@ -348,7 +350,9 @@ export interface OmpEventNormalizer {
 
 export const OMP_DEFAULT_MODEL: ModelRef = { providerID: "omp", modelID: "omp", variant: "default" };
 
-export const DEFAULT_NON_TERMINAL_GRACE_MS = 1500;
+const envGrace = Number(process.env.OC_NON_TERMINAL_GRACE_MS);
+export const DEFAULT_NON_TERMINAL_GRACE_MS =
+  Number.isFinite(envGrace) && envGrace > 0 ? envGrace : 180_000;
 
 /** Extracts the raw provider error message from a raw RPC frame. */
 function messagePayloadOf(event: OmpRpcEvent): Record<string, unknown> | undefined {
@@ -387,7 +391,7 @@ function fieldOf(event: OmpRpcEvent, field: string): unknown {
 }
 
 export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEventNormalizer {
-  const { transport, openCodeId, sessionPath } = ctx;
+  const { transport, openCodeId, sessionPath, cwd } = ctx;
   const nonTerminalGraceMs = ctx.nonTerminalGraceMs ?? DEFAULT_NON_TERMINAL_GRACE_MS;
 
   // Connection-level model mirror: survives resubscribes (per-turn state resets).
@@ -561,6 +565,30 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
 
     // 7. Any other frame cancels a pending non-terminal finalization.
     clearTimer();
+
+    // 7b. Compaction lifecycle: auto_compaction_start / auto_compaction_end
+    if (type === "auto_compaction_start") {
+      emit({
+        kind: "compaction_start",
+        reason: typeof event.reason === "string" ? event.reason : undefined,
+        action: typeof event.action === "string" ? event.action : undefined,
+      });
+      return;
+    }
+
+    if (type === "auto_compaction_end") {
+      const aborted = Boolean(event.aborted);
+      const willRetry = Boolean(event.willRetry);
+      emit({
+        kind: "compaction_end",
+        aborted,
+        willRetry,
+      });
+      if (!aborted) {
+        invalidateMessageCache(openCodeId, cwd);
+      }
+      return;
+    }
 
     // 8. Approval / question requests: respond closures are bound to the
     // transport here; the SSE layer only decorates them with bookkeeping.

@@ -140,7 +140,7 @@ export function mapOmpUsageToTokens(rawUsage: unknown, rawCost?: unknown): Usage
   };
 }
 
-export type AgentMessageRole = "user" | "developer" | "assistant" | "custom" | "toolResult";
+export type AgentMessageRole = "user" | "developer" | "assistant" | "custom" | "toolResult" | "compactionSummary";
 
 export interface AgentMessageContentBlock {
   type: "text" | "thinking" | "toolCall";
@@ -155,6 +155,11 @@ export interface AgentMessage {
   id?: string;
   role: AgentMessageRole;
   content?: AgentMessageContentBlock[] | string;
+  summary?: string;
+  shortSummary?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  method?: string;
   provider?: string;
   model?: string;
   variant?: string;
@@ -203,6 +208,7 @@ function openCodeRoleFor(msg: AgentMessage): "user" | "assistant" | null {
       return "user";
     case "assistant":
     case "toolResult":
+    case "compactionSummary":
       return "assistant";
     case "custom": {
       if (msg.display === false) return null;
@@ -709,8 +715,9 @@ export function mapRpcMessagesToOpenCodeRecords(
 
       const rawError = typeof msg.errorMessage === "string" ? msg.errorMessage : (typeof msg.error === "string" ? msg.error : undefined);
       const errorObj = rawError ? { message: rawError } : (msg.stopReason === "error" ? { message: "Turn ended with error" } : undefined);
+      const isCompaction = msg.role === "compactionSummary";
 
-      if (lastAssistantRecord) {
+      if (lastAssistantRecord && !isCompaction && !lastAssistantRecord.info.summary) {
         const parts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
         lastAssistantRecord.parts.push(...parts);
         updateAssistantCompletion(
@@ -750,6 +757,10 @@ export function mapRpcMessagesToOpenCodeRecords(
       } else {
         if (typeof msg.id === "string" && msg.id.startsWith("msg_")) {
           messageId = msg.id;
+        } else if (isCompaction) {
+          messageId = typeof msg.id === "string" && msg.id.length > 0
+            ? `msg_${openCodeId}_cmp_${msg.id}`
+            : `msg_${openCodeId}_cmp_${visibleIndex}`;
         } else if (lastUserMatched && lastUserMessageId) {
           messageId = `msg_${openCodeId}_asst_${lastUserMessageId}`;
         } else if (typeof msg.id === "string" && msg.id.length > 0) {
@@ -759,11 +770,33 @@ export function mapRpcMessagesToOpenCodeRecords(
         }
 
         visibleIndex++;
-        const parts = buildParts(msg, openCodeId, messageId, 0);
-
-        if (!finish) {
-          finish = parts.some((p) => p.type === "tool") ? "tool-calls" : "stop";
+        const parts: OpenCodePart[] = [];
+        if (isCompaction) {
+          const text = msg.summary || "Conversation history compacted";
+          parts.push({
+            id: `part_${openCodeId}_${messageId}_0`,
+            type: "text",
+            text,
+            time: { start: createdAt, end: createdAt },
+            messageID: messageId,
+            sessionID: openCodeId,
+          });
+          if (!finish) finish = "stop";
+        } else {
+          parts.push(...buildParts(msg, openCodeId, messageId, 0));
+          if (!finish) {
+            finish = parts.some((p) => p.type === "tool") ? "tool-calls" : "stop";
+          }
         }
+
+        const recordTokens = isCompaction
+          ? {
+              input: msg.tokensBefore ?? 0,
+              output: msg.tokensAfter ?? 0,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            }
+          : tokens;
 
         const record: OpenCodeMessageRecord = {
           info: {
@@ -771,23 +804,24 @@ export function mapRpcMessagesToOpenCodeRecords(
             role: "assistant",
             sessionID: openCodeId,
             parentID: lastUserMessageId,
-            agent: "omp",
+            agent: isCompaction ? "compaction" : "omp",
             model: { id: modelID, providerID, modelID, variant },
             providerID,
             modelID,
             variant,
             finish,
             error: errorObj,
-            mode: "primary",
+            summary: isCompaction ? true : undefined,
+            mode: isCompaction ? "compaction" : "primary",
             cost,
-            tokens,
-            time: { created: createdAt },
+            tokens: recordTokens,
+            time: { created: createdAt, completed: isCompaction ? createdAt : undefined },
           },
           parts,
         };
-        updateAssistantCompletion(record, assistantCompletionAt ?? createdAt, terminalAssistantCompletion);
+        updateAssistantCompletion(record, assistantCompletionAt ?? createdAt, terminalAssistantCompletion || isCompaction);
         records.push(record);
-        lastAssistantRecord = record;
+        lastAssistantRecord = isCompaction ? undefined : record;
       }
       asstStepIndex++;
     }
@@ -845,6 +879,26 @@ export async function loadMessagesFromFile(
     } catch {
       continue;
     }
+
+    if (entry.type === "compaction") {
+      let timestamp = typeof entry.timestamp === "number" ? entry.timestamp : undefined;
+      if (timestamp === undefined && typeof entry.timestamp === "string") {
+        const parsed = Date.parse(entry.timestamp);
+        if (!Number.isNaN(parsed)) timestamp = parsed;
+      }
+      messages.push({
+        id: typeof entry.id === "string" ? entry.id : undefined,
+        role: "compactionSummary",
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        shortSummary: typeof entry.shortSummary === "string" ? entry.shortSummary : undefined,
+        tokensBefore: typeof entry.tokensBefore === "number" ? entry.tokensBefore : undefined,
+        tokensAfter: typeof entry.tokensAfter === "number" ? entry.tokensAfter : undefined,
+        method: typeof entry.method === "string" ? entry.method : undefined,
+        timestamp: timestamp ?? Date.now(),
+      } as unknown as AgentMessage);
+      continue;
+    }
+
     if (entry.type !== "message") continue;
 
     const raw = entry.message;

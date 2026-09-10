@@ -26,6 +26,8 @@ import {
   emitPermissionReplied,
   emitQuestionReplied,
   emitQuestionRejected,
+  emitSessionCompactionStarted,
+  emitSessionCompacted,
 } from "./sse";
 import {
   addPendingPermission,
@@ -630,6 +632,18 @@ export function createEventHandler(
           event.respond(res);
         });
         emitQuestionAsked(qReq as unknown as Record<string, unknown>, cwd);
+        return;
+      }
+      case "compaction_start": {
+        finalizeCurrentPart();
+        emitSessionCompactionStarted(openCodeId, cwd);
+        return;
+      }
+      case "compaction_end": {
+        finalizeCurrentPart();
+        if (!event.aborted) {
+          emitSessionCompacted(openCodeId, cwd);
+        }
         return;
       }
       case "turn_end": {
