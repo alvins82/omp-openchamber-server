@@ -1,4 +1,4 @@
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
 
 type Environment = Record<string, string | undefined>;
@@ -12,6 +12,53 @@ export type OmpRuntimeInfo = {
 
 const bundledBinaryName = process.platform === "win32" ? "omp.exe" : "omp";
 const versionProbeTimeoutMs = 1_000;
+
+let explicitOmpBinaryOverride: string | null = null;
+
+export function setExplicitOmpBinary(binaryPath: string | null): void {
+  if (binaryPath) {
+    const validated = validateOmpBinary(binaryPath);
+    explicitOmpBinaryOverride = validated;
+    process.env.OMP_BIN = validated;
+    Bun.env.OMP_BIN = validated;
+  } else {
+    explicitOmpBinaryOverride = null;
+    delete process.env.OMP_BIN;
+    delete Bun.env.OMP_BIN;
+  }
+}
+
+export function getExplicitOmpBinary(): string | null {
+  return explicitOmpBinaryOverride;
+}
+
+export function validateOmpBinary(binaryPath: string): string {
+  const trimmed = binaryPath.trim();
+  if (!trimmed) {
+    throw new Error("OMP binary path cannot be empty.");
+  }
+  const resolved = resolvePath(process.cwd(), trimmed);
+  if (!existsSync(resolved)) {
+    throw new Error(`Specified OMP binary does not exist: ${resolved}`);
+  }
+  const s = statSync(resolved);
+  if (!s.isFile()) {
+    throw new Error(`Specified OMP binary is not a file: ${resolved}`);
+  }
+  if (!isExecutable(resolved)) {
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(resolved, 0o755);
+      } catch {
+        // ignore
+      }
+    }
+    if (!isExecutable(resolved)) {
+      throw new Error(`Specified OMP binary is not executable: ${resolved}`);
+    }
+  }
+  return resolved;
+}
 
 function isExecutable(filePath: string): boolean {
   try {
@@ -46,7 +93,11 @@ function bundledCandidates(env: Environment): string[] {
 }
 
 function currentEnvironment(): Environment {
-  return { ...Bun.env, ...process.env };
+  return {
+    ...Bun.env,
+    ...process.env,
+    ...(explicitOmpBinaryOverride ? { OMP_BIN: explicitOmpBinaryOverride } : {}),
+  };
 }
 
 function sourceForBinary(binaryPath: string, env: Environment): OmpRuntimeSource {

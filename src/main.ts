@@ -34,8 +34,9 @@ import {
 } from "./prompt";
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
 import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
-import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion } from "./providers/omp/binary";
+import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion, setExplicitOmpBinary } from "./providers/omp/binary";
 import { startOmpUpdateChecker } from "./providers/omp/update-check";
+import { parseCliArgs, printHelp, type SidecarCliOptions } from "./cli";
 import type { OpenCodeProvidersResponse } from "./providers/types";
 import { logger, httpLogger } from "./logger";
 import { join, isAbsolute, basename, extname } from "node:path";
@@ -333,6 +334,27 @@ interface SidecarWebSocketData {
 }
 
 const webSocketCleanups = new WeakMap<object, () => void>();
+
+let cliOptions: SidecarCliOptions;
+try {
+  cliOptions = parseCliArgs();
+} catch (err: any) {
+  console.error(`[sidecar] Error: ${err?.message || err}`);
+  process.exit(1);
+}
+
+if (cliOptions.help) {
+  printHelp();
+  process.exit(0);
+}
+
+if (cliOptions.binary) {
+  setExplicitOmpBinary(cliOptions.binary);
+}
+
+if (cliOptions.port !== undefined) {
+  process.env.OC_SIDECAR_PORT = String(cliOptions.port);
+}
 
 await ensureOmpBinary();
 
@@ -2072,6 +2094,9 @@ function logStartupBanner(port?: number): void {
   logger.info(`  • Working directory : ${process.cwd()}`);
   logger.info(`  • Active adapters   : ${backendList}`);
   logger.info(`  • OMP version       : ${ompRuntime.version ?? "unknown"} (${ompRuntime.source})`);
+  if (ompRuntime.binary) {
+    logger.info(`  • OMP binary        : ${ompRuntime.binary}`);
+  }
   logger.info(`  • Small model       : ${smallModelInfo}`);
   logger.info(`  • Extensions        : ${extensions}`);
   logger.info(`  • Browser control   : ready`);

@@ -2,7 +2,15 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion, resolveOmpBinary } from "./binary";
+import {
+  ensureOmpBinary,
+  getExplicitOmpBinary,
+  getOmpRuntimeInfo,
+  probeOmpVersion,
+  resolveOmpBinary,
+  setExplicitOmpBinary,
+  validateOmpBinary,
+} from "./binary";
 
 const temporaryDirectories: string[] = [];
 
@@ -14,6 +22,7 @@ function executable(directory: string, name = "omp"): string {
 }
 
 afterEach(() => {
+  setExplicitOmpBinary(null);
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -77,3 +86,46 @@ describe("resolveOmpBinary", () => {
     expect(version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
+
+describe("validateOmpBinary", () => {
+  test("validates an existing executable binary", () => {
+    const directory = mkdtempSync(join(tmpdir(), "omp-binary-"));
+    temporaryDirectories.push(directory);
+    const bin = executable(directory, "custom-omp");
+
+    expect(validateOmpBinary(bin)).toBe(bin);
+  });
+
+  test("throws on empty string", () => {
+    expect(() => validateOmpBinary("")).toThrow("OMP binary path cannot be empty");
+    expect(() => validateOmpBinary("   ")).toThrow("OMP binary path cannot be empty");
+  });
+
+  test("throws on non-existent path", () => {
+    expect(() => validateOmpBinary("/non/existent/path/omp")).toThrow("Specified OMP binary does not exist");
+  });
+
+  test("throws on directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "omp-binary-"));
+    temporaryDirectories.push(directory);
+
+    expect(() => validateOmpBinary(directory)).toThrow("Specified OMP binary is not a file");
+  });
+});
+
+describe("setExplicitOmpBinary", () => {
+  test("configures and clears explicit binary override", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "omp-binary-"));
+    temporaryDirectories.push(directory);
+    const bin = executable(directory, "custom-omp");
+
+    setExplicitOmpBinary(bin);
+    expect(getExplicitOmpBinary()).toBe(bin);
+    expect(resolveOmpBinary()).toBe(bin);
+    await expect(ensureOmpBinary()).resolves.toBe(bin);
+
+    setExplicitOmpBinary(null);
+    expect(getExplicitOmpBinary()).toBeNull();
+  });
+});
+

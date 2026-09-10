@@ -15,19 +15,38 @@ Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my
 ```bash
 bun install
 bun run src/main.ts
-# → [proxy] listening on http://127.0.0.1:4096
+# → [sidecar] Listening on http://127.0.0.1:4096
 ```
 
-On startup the sidecar checks the project-owned `resources/omp` directory and
+#### Custom OMP Binary
+
+You can run the sidecar with a specific OMP binary by passing the `--binary` CLI argument:
+
+```bash
+bun run src/main.ts --binary /path/to/omp
+# or with bun run start:
+bun run start -- --binary /path/to/omp
+```
+
+Aliases `--omp-bin`, `--omp-binary`, and `-b` are also supported. Alternatively, you can set the `OMP_BIN` environment variable:
+
+```bash
+OMP_BIN=/path/to/omp bun run src/main.ts
+```
+
+#### CLI Options
+
+- `-b, --binary <path>`: Path to custom OMP binary (aliases: `--omp-bin`, `--omp-binary`).
+- `-p, --port <port>`: Port to listen on (default: `4096`, or `OC_SIDECAR_PORT`).
+- `-h, --help`: Display help and usage instructions.
+
+On startup, if no custom binary is specified, the sidecar checks the project-owned `resources/omp` directory and
 downloads the pinned OMP release there when it is missing. It always launches
-that staged binary; it never falls back to an installed `omp` or `PATH`.
+that staged binary; it never falls back to an unmanaged `omp` on `PATH`.
 `bun run prepare:omp` can be used to stage it manually, and `bun run
 verify:omp` verifies the staged release. Set `OMP_VERSION` when preparing a
 different release, or `OMP_TARGET` when staging one of the supported release
 targets explicitly.
-
-`OMP_BIN` remains an explicit override for tests and local development. It is
-not inferred from the environment or used as a fallback.
 
 ### 3. Connect to OpenChamber
 
