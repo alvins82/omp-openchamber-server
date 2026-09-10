@@ -185,7 +185,7 @@ describe("terminal turn_end", () => {
     expect(h.events[0].stopReason).toBe("error");
   });
 
-  test("nested provider error on turn_end surfaces as turn_end error", () => {
+  test("nested provider error on turn_end surfaces as turn_end error when agent ends", () => {
     const h = createHarness();
     h.feed({
       type: "turn_end",
@@ -200,11 +200,117 @@ describe("terminal turn_end", () => {
       },
     } as unknown as OmpRpcEvent);
 
+    expect(kinds(h.events)).toEqual(["model"]);
+    h.feed({ type: "agent_end", isTerminal: true } as unknown as OmpRpcEvent);
+
     expect(kinds(h.events)).toEqual(["model", "turn_end"]);
     const turnEnd = h.events[1];
     if (turnEnd.kind !== "turn_end") return;
     expect(turnEnd.error).toBe("context window exceeded");
     expect(turnEnd.stopReason).toBe("error");
+  });
+
+  test("nested provider error on agent_end with messages array surfaces as turn_end error", () => {
+    const h = createHarness();
+    h.feed({
+      type: "agent_end",
+      isTerminal: true,
+      messages: [
+        {
+          role: "assistant",
+          provider: "vllm",
+          model: "qwen3.8-27b",
+          stopReason: "error",
+          errorStatus: 400,
+          errorId: 8392704,
+          errorMessage: "context window exceeded",
+        },
+      ],
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual(["model", "turn_end"]);
+    const turnEnd = h.events[1];
+    if (turnEnd.kind !== "turn_end") return;
+    expect(turnEnd.error).toBe("context window exceeded");
+    expect(turnEnd.stopReason).toBe("error");
+  });
+
+  test("turn_end with provider error followed by auto_compaction does not terminate turn and allows continuation", () => {
+    const h = createHarness();
+    h.feed({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorStatus: 400,
+        errorMessage: "400 This model's maximum context length is 117120 tokens.",
+      },
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual([]); // NOT terminated
+
+    h.feed({
+      type: "auto_compaction_start",
+      reason: "overflow",
+      action: "shake",
+    } as unknown as OmpRpcEvent);
+    expect(kinds(h.events)).toEqual(["compaction_start"]);
+
+    h.feed({
+      type: "auto_compaction_end",
+      willRetry: true,
+      aborted: false,
+    } as unknown as OmpRpcEvent);
+    expect(kinds(h.events)).toEqual(["compaction_start", "compaction_end"]);
+
+    h.feed({
+      type: "agent_end",
+      isTerminal: false,
+      willContinue: true,
+    } as unknown as OmpRpcEvent);
+    // Non-terminal grace timer active; turn still open!
+    expect(kinds(h.events)).toEqual(["compaction_start", "compaction_end"]);
+
+    h.feed({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", text: "Retried answer" },
+    } as unknown as OmpRpcEvent);
+    expect(kinds(h.events)).toEqual(["compaction_start", "compaction_end", "text_delta"]);
+
+    h.feed({
+      type: "agent_end",
+      isTerminal: true,
+    } as unknown as OmpRpcEvent);
+    expect(kinds(h.events)).toEqual(["compaction_start", "compaction_end", "text_delta", "turn_end"]);
+  });
+
+  test("turn_end with provider error followed by non-terminal agent_end holds turn open for retry", () => {
+    const h = createHarness();
+    h.feed({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "transient provider failure",
+      },
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual([]);
+
+    h.feed({
+      type: "agent_end",
+      isTerminal: false,
+      willContinue: true,
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual([]);
+
+    h.feed({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", text: "Recovered" },
+    } as unknown as OmpRpcEvent);
+
+    expect(kinds(h.events)).toEqual(["text_delta"]);
   });
 });
 

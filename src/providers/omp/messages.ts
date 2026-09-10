@@ -734,6 +734,8 @@ export function mapRpcMessagesToOpenCodeRecords(
         }
         if (errorObj) {
           lastAssistantRecord.info.error = errorObj;
+        } else if (lastAssistantRecord.info.finish === "stop") {
+          lastAssistantRecord.info.error = undefined;
         }
         if (tokens.input > 0 || tokens.output > 0 || tokens.cache.read > 0 || tokens.cache.write > 0) {
           lastAssistantRecord.info.tokens = tokens;

@@ -340,7 +340,8 @@ describe("golden turn sequence (event handler -> SSE)", () => {
         model: "qwen3.8-27b",
       },
     } as unknown as OmpRpcEvent;
-    expect(runTurn([errorEvent])).toBe(1);
+    const endEvent = { type: "agent_end", isTerminal: true } as unknown as OmpRpcEvent;
+    expect(runTurn([errorEvent, endEvent])).toBe(1);
     expect(got.length).toBeGreaterThanOrEqual(3);
 
     const messagePartEvt = got.find((e) => e.type === "message.part.updated");
@@ -357,6 +358,62 @@ describe("golden turn sequence (event handler -> SSE)", () => {
 
     const sessionErrorEvt = got.find((e) => e.type === "session.error");
     expect(sessionErrorEvt).toBeDefined();
+  });
+
+  it("turn_end with provider error followed by compaction continues and completes cleanly on retried answer", () => {
+    const errorTurnEnd = {
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "400 This model's maximum context length is 117120 tokens.",
+        errorStatus: 400,
+      },
+    } as unknown as OmpRpcEvent;
+    const compactionStart = {
+      type: "auto_compaction_start",
+      reason: "overflow",
+      action: "shake",
+    } as unknown as OmpRpcEvent;
+    const compactionEnd = {
+      type: "auto_compaction_end",
+      willRetry: true,
+      aborted: false,
+    } as unknown as OmpRpcEvent;
+    const nonTerminalEnd = {
+      type: "agent_end",
+      isTerminal: false,
+      willContinue: true,
+    } as unknown as OmpRpcEvent;
+    const textDelta = {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", text: "Compacted and retried response" },
+    } as unknown as OmpRpcEvent;
+    const terminalEnd = {
+      type: "agent_end",
+      isTerminal: true,
+    } as unknown as OmpRpcEvent;
+
+    expect(runTurn([errorTurnEnd, compactionStart, compactionEnd, nonTerminalEnd, textDelta, terminalEnd])).toBe(1);
+
+    const compactionStartedEvt = got.find((e) => e.type === "session.next.compaction.started");
+    expect(compactionStartedEvt).toBeDefined();
+
+    const compactedEvt = got.find((e) => e.type === "session.compacted");
+    expect(compactedEvt).toBeDefined();
+
+    const sessionErrorEvt = got.find((e) => e.type === "session.error");
+    expect(sessionErrorEvt).toBeUndefined();
+
+    const finalMessageUpdatedEvt = got.filter((e) => e.type === "message.updated").at(-1);
+    expect(finalMessageUpdatedEvt).toBeDefined();
+    const infoProps = finalMessageUpdatedEvt!.properties.info as Record<string, unknown>;
+    expect(infoProps.finish).toBe("stop");
+    expect(infoProps.error).toBeUndefined();
+
+    const textPart = got.find((e) => e.type === "message.part.updated" && (e.properties.part as Record<string, unknown>).type === "text");
+    expect(textPart).toBeDefined();
+    expect((textPart!.properties.part as Record<string, unknown>).text).toBe("Compacted and retried response");
   });
 
   it("prompt_result with agentInvoked false also completes silently", () => {

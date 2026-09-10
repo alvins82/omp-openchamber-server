@@ -355,6 +355,10 @@ describe("promptSessionAsync orchestration", () => {
         errorMessage: "context limit",
       },
     });
+    t.fire({
+      type: "agent_end",
+      isTerminal: true,
+    });
     t.promptSettler()?.reject(new Error("RPC prompt: context limit"));
     await waitFor(() => !isSessionBusy(openCodeId, cwd), 1000);
     stop();

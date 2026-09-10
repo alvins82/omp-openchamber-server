@@ -357,9 +357,18 @@ export const DEFAULT_NON_TERMINAL_GRACE_MS =
 /** Extracts the raw provider error message from a raw RPC frame. */
 function messagePayloadOf(event: OmpRpcEvent): Record<string, unknown> | undefined {
   const message = event.message;
-  return message !== null && typeof message === "object" && !Array.isArray(message)
-    ? message as Record<string, unknown>
-    : undefined;
+  if (message !== null && typeof message === "object" && !Array.isArray(message)) {
+    return message as Record<string, unknown>;
+  }
+  if (Array.isArray(event.messages) && event.messages.length > 0) {
+    for (let i = event.messages.length - 1; i >= 0; i--) {
+      const candidate = event.messages[i];
+      if (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) {
+        return candidate as Record<string, unknown>;
+      }
+    }
+  }
+  return undefined;
 }
 
 function errorMessageOf(value: unknown): string | undefined {
@@ -403,6 +412,14 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
   const toolParts = new Map<string, { tool: string; state: ToolPartState }>();
   const subagentSessionIds = new Map<string, string>();
   let nonTerminalTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingTurnError: {
+    error?: string;
+    stopReason?: string;
+    errorStatus?: unknown;
+    errorId?: unknown;
+    provider?: string;
+    model?: string;
+  } | undefined;
 
   const emit = (event: NormalizedTurnEvent) => sink?.(event);
 
@@ -461,7 +478,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
     }
 
     // 2. Model sync: adopt provider/model announcements from message-ish frames.
-    const rawMsg = (event.message || event.data || event.assistantMessageEvent) as Record<string, unknown> | undefined;
+    const rawMsg = (messagePayloadOf(event) || event.data || event.assistantMessageEvent) as Record<string, unknown> | undefined;
     let modelChanged = false;
     if (rawMsg && typeof rawMsg.provider === "string" && typeof rawMsg.model === "string") {
       if (model.providerID !== rawMsg.provider || model.modelID !== rawMsg.model) {
@@ -507,34 +524,58 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
     const hasErrorValue = errorValue !== undefined && errorValue !== null && errorValue !== false && errorValue !== "";
     const isError = stopReason === "error" || rawError !== undefined || hasErrorValue || errorStatus != null;
 
+    // 4b. Turn end: store any error details for subsequent agent_end or compaction
+    // handling without prematurely terminating the turn.
+    if (type === "turn_end") {
+      if (isError) {
+        pendingTurnError = {
+          error: rawError,
+          stopReason,
+          errorStatus,
+          errorId: fieldOf(event, "errorId"),
+          provider: (fieldOf(event, "provider") as string) || model.providerID,
+          model: (fieldOf(event, "model") as string) || model.modelID,
+        };
+      } else {
+        pendingTurnError = undefined;
+      }
+      return;
+    }
+
     // 5. Terminal turn: agent ended definitively (or no agent was invoked).
-    // OMP reports provider failures as a `turn_end` frame with the assistant
-    // message nested under `message`; successful turns still use agent_end.
     if (
-      (type === "turn_end" && isError) ||
       (type === "agent_end" && (event.isTerminal === undefined || event.isTerminal === true)) ||
       (type === "prompt_result" && event.agentInvoked === false)
     ) {
       clearTimer();
-      if (isError) {
+      const terminalError = rawError ?? pendingTurnError?.error;
+      const terminalStopReason = stopReason ?? pendingTurnError?.stopReason;
+      const terminalProvider = (fieldOf(event, "provider") as string) || pendingTurnError?.provider || model.providerID;
+      const terminalModel = (fieldOf(event, "model") as string) || pendingTurnError?.model || model.modelID;
+      const terminalErrorStatus = errorStatus ?? pendingTurnError?.errorStatus;
+      const terminalErrorId = fieldOf(event, "errorId") ?? pendingTurnError?.errorId;
+      const terminalIsError = isError || pendingTurnError !== undefined;
+
+      if (terminalIsError) {
         promptLogger.error(
           {
             sessionID: openCodeId,
-            provider: (fieldOf(event, "provider") as string) || model.providerID,
-            model: (fieldOf(event, "model") as string) || model.modelID,
-            stopReason,
-            errorStatus,
-            errorId: fieldOf(event, "errorId"),
-            errorMessage: rawError,
+            provider: terminalProvider,
+            model: terminalModel,
+            stopReason: terminalStopReason,
+            errorStatus: terminalErrorStatus,
+            errorId: terminalErrorId,
+            errorMessage: terminalError,
           },
           "[prompt] agent turn ended with provider error",
         );
       }
       emit({
         kind: "turn_end",
-        error: rawError,
-        stopReason,
+        error: terminalError,
+        stopReason: terminalStopReason,
       });
+      pendingTurnError = undefined;
       return;
     }
 
@@ -542,32 +583,45 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
     // grace window unless another frame arrives first.
     if (type === "agent_end" && event.isTerminal === false) {
       clearTimer();
-      if (isError) {
+      const nonTerminalError = rawError ?? pendingTurnError?.error;
+      const nonTerminalStopReason = stopReason ?? pendingTurnError?.stopReason;
+      const nonTerminalProvider = (fieldOf(event, "provider") as string) || pendingTurnError?.provider || model.providerID;
+      const nonTerminalModel = (fieldOf(event, "model") as string) || pendingTurnError?.model || model.modelID;
+      const nonTerminalErrorStatus = errorStatus ?? pendingTurnError?.errorStatus;
+      const nonTerminalErrorId = fieldOf(event, "errorId") ?? pendingTurnError?.errorId;
+      const nonTerminalIsError = isError || pendingTurnError !== undefined;
+
+      if (nonTerminalIsError) {
         promptLogger.error(
           {
             sessionID: openCodeId,
-            provider: (fieldOf(event, "provider") as string) || model.providerID,
-            model: (fieldOf(event, "model") as string) || model.modelID,
-            stopReason,
-            errorStatus,
-            errorId: fieldOf(event, "errorId"),
-            errorMessage: rawError,
+            provider: nonTerminalProvider,
+            model: nonTerminalModel,
+            stopReason: nonTerminalStopReason,
+            errorStatus: nonTerminalErrorStatus,
+            errorId: nonTerminalErrorId,
+            errorMessage: nonTerminalError,
           },
           "[prompt] non-terminal agent turn ended with provider error",
         );
       }
+      pendingTurnError = undefined;
       nonTerminalTimer = setTimeout(() => {
         nonTerminalTimer = undefined;
-        emit({ kind: "turn_end", error: rawError, stopReason });
+        emit({ kind: "turn_end", error: nonTerminalError, stopReason: nonTerminalStopReason });
       }, nonTerminalGraceMs);
       return;
     }
 
     // 7. Any other frame cancels a pending non-terminal finalization.
     clearTimer();
+    if (type === "turn_start" || type === "message_start" || type === "message_update" || type === "auto_retry_start") {
+      pendingTurnError = undefined;
+    }
 
     // 7b. Compaction lifecycle: auto_compaction_start / auto_compaction_end
     if (type === "auto_compaction_start") {
+      pendingTurnError = undefined;
       emit({
         kind: "compaction_start",
         reason: typeof event.reason === "string" ? event.reason : undefined,
@@ -577,6 +631,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
     }
 
     if (type === "auto_compaction_end") {
+      pendingTurnError = undefined;
       const aborted = Boolean(event.aborted);
       const willRetry = Boolean(event.willRetry);
       emit({
