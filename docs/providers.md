@@ -42,7 +42,7 @@ subagent snapshot so `/session/status` can recover when a lifecycle event was
 missed. Backends translate
 their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 `text_delta`, `reasoning_delta`, `tool`, `usage`, `model`, approvals/questions,
-`subagent_*`, `todo`, `turn_end`. Ownership rules (from the type comments):
+`subagent_*`, `todo`, `telemetry`, `turn_end`. Ownership rules (from the type comments):
 
 - The backend owns usage/model aggregation; a `usage` event is a full snapshot
   and MUST precede the terminal `turn_end`.
@@ -51,6 +51,9 @@ their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 - The sink finalizes the turn on every `turn_end`; a backend that ends without
   a definitive terminal event emits its own non-terminal `turn_end` after a
   grace timer.
+- `telemetry` is an optional aggregate over completed raw model requests in the
+  current visible turn. It is kept separate from the latest `usage` snapshot
+  because the latter drives context-window display.
 
 ## Registration & Selection
 

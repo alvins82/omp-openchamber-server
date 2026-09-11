@@ -23,6 +23,108 @@ export interface UsageMappingResult {
   cost: number;
 }
 
+interface OmpTurnTelemetry {
+  turnUsage: TokenBreakdown;
+  modelDurationMs?: number;
+  ttftMs?: number;
+  ttftSamples?: number;
+}
+
+function hasTokenUsage(tokens: TokenBreakdown): boolean {
+  return tokens.input > 0
+    || tokens.output > 0
+    || tokens.reasoning > 0
+    || tokens.cache.read > 0
+    || tokens.cache.write > 0;
+}
+
+function addTokenUsage(left: TokenBreakdown, right: TokenBreakdown): TokenBreakdown {
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    reasoning: left.reasoning + right.reasoning,
+    cache: {
+      read: left.cache.read + right.cache.read,
+      write: left.cache.write + right.cache.write,
+    },
+  };
+}
+
+function getRecordedTurnTelemetry(record: OpenCodeMessageRecord): OmpTurnTelemetry | undefined {
+  const ompMetadata = record.info.metadata?.omp;
+  if (!ompMetadata || typeof ompMetadata !== "object") return undefined;
+  return ompMetadata as OmpTurnTelemetry;
+}
+
+function recordTurnTelemetry(record: OpenCodeMessageRecord, telemetry: OmpTurnTelemetry): void {
+  const ompMetadata = record.info.metadata?.omp;
+  const current = ompMetadata && typeof ompMetadata === "object" ? ompMetadata as Record<string, unknown> : {};
+  record.info.metadata = {
+    ...record.info.metadata,
+    omp: { ...current, ...telemetry },
+  };
+}
+
+function getAssistantModelDuration(msg: AgentMessage, createdAt: number): number | undefined {
+  if (msg.role !== "assistant") return undefined;
+  if (typeof msg.duration === "number" && Number.isFinite(msg.duration) && msg.duration >= 0) {
+    return msg.duration;
+  }
+  const completedAt = getAssistantCompletionAt(msg, createdAt);
+  return completedAt === undefined ? undefined : completedAt - createdAt;
+}
+
+function getAssistantTtft(msg: AgentMessage): number | undefined {
+  if (
+    msg.role !== "assistant"
+    || typeof msg.ttft !== "number"
+    || !Number.isFinite(msg.ttft)
+    || msg.ttft < 0
+    || (typeof msg.duration === "number" && msg.ttft > msg.duration)
+  ) {
+    return undefined;
+  }
+  return msg.ttft;
+}
+
+function getTurnTelemetryForMessage(
+  msg: AgentMessage,
+  tokens: TokenBreakdown,
+  createdAt: number,
+): OmpTurnTelemetry | undefined {
+  const modelDurationMs = getAssistantModelDuration(msg, createdAt);
+  const ttftMs = getAssistantTtft(msg);
+  if (!hasTokenUsage(tokens) && modelDurationMs === undefined && ttftMs === undefined) return undefined;
+  return {
+    turnUsage: tokens,
+    ...(modelDurationMs !== undefined ? { modelDurationMs } : {}),
+    ...(ttftMs !== undefined ? { ttftMs, ttftSamples: 1 } : {}),
+  };
+}
+
+function addTurnTelemetry(
+  record: OpenCodeMessageRecord,
+  msg: AgentMessage,
+  tokens: TokenBreakdown,
+  createdAt: number,
+): void {
+  const current = getRecordedTurnTelemetry(record);
+  const incoming = getTurnTelemetryForMessage(msg, tokens, createdAt);
+  if (!current && !incoming) return;
+
+  const currentUsage = current?.turnUsage ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const incomingUsage = incoming?.turnUsage ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const modelDurationMs = (current?.modelDurationMs ?? 0) + (incoming?.modelDurationMs ?? 0);
+  const ttftSamples = (current?.ttftSamples ?? 0) + (incoming?.ttftSamples ?? 0);
+  const ttftMs = (current?.ttftMs ?? 0) + (incoming?.ttftMs ?? 0);
+
+  recordTurnTelemetry(record, {
+    turnUsage: addTokenUsage(currentUsage, incomingUsage),
+    ...(modelDurationMs > 0 || current?.modelDurationMs !== undefined || incoming?.modelDurationMs !== undefined ? { modelDurationMs } : {}),
+    ...(ttftSamples > 0 ? { ttftMs, ttftSamples } : {}),
+  });
+}
+
 function firstPositive(...values: unknown[]): number {
   for (const v of values) {
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
@@ -181,6 +283,8 @@ export interface AgentMessage {
   completedAt?: number;
   /** Persisted OMP model-request duration in milliseconds. */
   duration?: number;
+  /** Persisted OMP time-to-first-token in milliseconds. */
+  ttft?: number;
 }
 
 const TTL_MS = 5_000;
@@ -357,6 +461,18 @@ function getAssistantCompletionAt(msg: AgentMessage, createdAt: number): number 
   return undefined;
 }
 
+function getAssistantFirstOutputAt(msg: AgentMessage, createdAt: number): number {
+  if (
+    typeof msg.ttft === "number"
+    && Number.isFinite(msg.ttft)
+    && msg.ttft >= 0
+    && (typeof msg.duration !== "number" || msg.ttft <= msg.duration)
+  ) {
+    return createdAt + msg.ttft;
+  }
+  return createdAt;
+}
+
 function isTerminalAssistantCompletion(msg: AgentMessage, completedAt: number | undefined): boolean {
   return msg.role === "assistant"
     && completedAt !== undefined
@@ -372,18 +488,23 @@ function buildParts(
 ): OpenCodePart[] {
   const parts: OpenCodePart[] = [];
   let currentTextPart: { type: "text" | "reasoning"; text: string } | null = null;
+  let hasOutputPart = false;
+  const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+  const firstOutputAt = getAssistantFirstOutputAt(msg, msgTime);
+  const toolStartAt = getAssistantCompletionAt(msg, msgTime) ?? firstOutputAt;
 
   const flushText = () => {
     if (currentTextPart) {
-      const msgTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
+      const partTime = hasOutputPart ? msgTime : firstOutputAt;
       parts.push({
         id: `part_${openCodeId}_${messageId}_${startIndex + parts.length}`,
         type: currentTextPart.type,
         text: currentTextPart.text || "(empty)",
-        time: { start: msgTime, end: msgTime },
+        time: { start: partTime, end: partTime },
         messageID: messageId,
         sessionID: openCodeId,
       });
+      hasOutputPart = true;
       currentTextPart = null;
     }
   };
@@ -412,8 +533,8 @@ function buildParts(
       }
     } else if (kind === "toolCall") {
       flushText();
-      const startTime = typeof msg.timestamp === "number" ? msg.timestamp : Date.now();
-      parts.push(createToolPart(block, openCodeId, messageId, startIndex + parts.length, startTime));
+      parts.push(createToolPart(block, openCodeId, messageId, startIndex + parts.length, toolStartAt));
+      hasOutputPart = true;
     } else if (kind === "image") {
       flushText();
       const mime =
@@ -604,7 +725,7 @@ export function mapRpcMessagesToOpenCodeRecords(
   const recordedList = getRecordedUserMessages(openCodeId, dbPath);
   const matchedRecordedIndices = new Set<number>();
   let userMessageIndex = 0;
-  let asstStepIndex = 0;
+  let assistantSegmentIndex = 0;
 
   const userMessages = messages.filter((m) => openCodeRoleFor(m) === "user");
 
@@ -628,7 +749,7 @@ export function mapRpcMessagesToOpenCodeRecords(
 
     let messageId: string;
     if (role === "user") {
-      asstStepIndex = 0;
+      assistantSegmentIndex = 0;
       const msgText = extractUserMessageText(msg);
       let matchedIndex = -1;
 
@@ -716,6 +837,7 @@ export function mapRpcMessagesToOpenCodeRecords(
       const rawError = typeof msg.errorMessage === "string" ? msg.errorMessage : (typeof msg.error === "string" ? msg.error : undefined);
       const errorObj = rawError ? { message: rawError } : (msg.stopReason === "error" ? { message: "Turn ended with error" } : undefined);
       const isCompaction = msg.role === "compactionSummary";
+      if (isCompaction) assistantSegmentIndex++;
 
       if (lastAssistantRecord && !isCompaction && !lastAssistantRecord.info.summary) {
         const parts = buildParts(msg, openCodeId, lastAssistantRecord.info.id, lastAssistantRecord.parts.length);
@@ -737,7 +859,8 @@ export function mapRpcMessagesToOpenCodeRecords(
         } else if (lastAssistantRecord.info.finish === "stop") {
           lastAssistantRecord.info.error = undefined;
         }
-        if (tokens.input > 0 || tokens.output > 0 || tokens.cache.read > 0 || tokens.cache.write > 0) {
+        addTurnTelemetry(lastAssistantRecord, msg, tokens, createdAt);
+        if (hasTokenUsage(tokens)) {
           lastAssistantRecord.info.tokens = tokens;
         }
         if (cost > 0) {
@@ -764,7 +887,8 @@ export function mapRpcMessagesToOpenCodeRecords(
             ? `msg_${openCodeId}_cmp_${msg.id}`
             : `msg_${openCodeId}_cmp_${visibleIndex}`;
         } else if (lastUserMatched && lastUserMessageId) {
-          messageId = `msg_${openCodeId}_asst_${lastUserMessageId}`;
+          const segmentSuffix = assistantSegmentIndex > 0 ? `_segment_${assistantSegmentIndex}` : "";
+          messageId = `msg_${openCodeId}_asst_${lastUserMessageId}${segmentSuffix}`;
         } else if (typeof msg.id === "string" && msg.id.length > 0) {
           messageId = `msg_${openCodeId}_${msg.id}`;
         } else {
@@ -800,6 +924,7 @@ export function mapRpcMessagesToOpenCodeRecords(
             }
           : tokens;
 
+        const turnTelemetry = isCompaction ? undefined : getTurnTelemetryForMessage(msg, tokens, createdAt);
         const record: OpenCodeMessageRecord = {
           info: {
             id: messageId,
@@ -815,6 +940,7 @@ export function mapRpcMessagesToOpenCodeRecords(
             error: errorObj,
             summary: isCompaction ? true : undefined,
             mode: isCompaction ? "compaction" : "primary",
+            metadata: turnTelemetry ? { omp: turnTelemetry } : undefined,
             cost,
             tokens: recordTokens,
             time: { created: createdAt, completed: isCompaction ? createdAt : undefined },
@@ -825,7 +951,6 @@ export function mapRpcMessagesToOpenCodeRecords(
         records.push(record);
         lastAssistantRecord = isCompaction ? undefined : record;
       }
-      asstStepIndex++;
     }
   }
 

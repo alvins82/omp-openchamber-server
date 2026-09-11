@@ -33,7 +33,7 @@ const asstMsg = (
   content: unknown[],
   ts = 1755927605000,
   stopReason = "stop",
-  timing: { completedAt?: number; duration?: number } = {},
+  timing: { completedAt?: number; duration?: number; ttft?: number } = {},
 ) => ({
   type: "message", id, timestamp: new Date(ts).toISOString(),
   message: {
@@ -662,6 +662,16 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       reasoning: 40,
       cache: { read: 1000, write: 0 },
     });
+    expect(out![1].info.metadata).toEqual({
+      omp: {
+        turnUsage: {
+          input: 2200,
+          output: 130,
+          reasoning: 70,
+          cache: { read: 1500, write: 0 },
+        },
+      },
+    });
     expect(out![1].parts).toHaveLength(4);
     expect(out![1].parts[0].type).toBe("reasoning");
     expect((out![1].parts[0] as any).text).toBe("Step 1: Check files");
@@ -903,6 +913,16 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(out![1].info.tokens?.input).toBe(2000);
     expect(out![1].info.tokens?.output).toBe(40);
     expect(out![1].info.cost).toBe(0.015);
+    expect(out![1].info.metadata).toEqual({
+      omp: {
+        turnUsage: {
+          input: 4500,
+          output: 170,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      },
+    });
 
     expect(out![1].parts).toHaveLength(5);
     expect(out![1].parts[0].type).toBe("reasoning");
@@ -919,6 +939,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
 
   it("parses compaction entries as assistant messages with summary = true", async () => {
     const compactSid = "sess-compaction-test-uuid";
+    recordUserMessageId(compactSid, "First prompt", "msg_compaction_prompt", TEST_DB);
     const path = fileFor("compaction-session.jsonl", [
       userMsg("u1", "First prompt", 1755927600000),
       {
@@ -952,6 +973,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
           content: [{ type: "text", text: "Post-compaction continuation" }],
           stopReason: "stop",
           timestamp: 1755927603000,
+          ttft: 500,
         },
       },
     ]);
@@ -964,6 +986,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
 
     // 1: pre-compaction assistant
     expect(out![1].info.role).toBe("assistant");
+    expect(out![1].info.id).toBe(`msg_${compactSid}_asst_msg_compaction_prompt`);
     expect(out![1].info.summary).toBeUndefined();
     expect(out![1].parts[0]).toMatchObject({ type: "text", text: "Pre-compaction assistant answer" });
 
@@ -987,7 +1010,10 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
 
     // 3: post-compaction assistant is NOT collated into compaction
     expect(out![3].info.role).toBe("assistant");
+    expect(out![3].info.id).toBe(`msg_${compactSid}_asst_msg_compaction_prompt_segment_1`);
+    expect(out![3].info.id).not.toBe(out![1].info.id);
     expect(out![3].info.summary).toBeUndefined();
     expect(out![3].parts[0]).toMatchObject({ type: "text", text: "Post-compaction continuation" });
+    expect((out![3].parts[0] as OpenCodeTextPart).time).toEqual({ start: 1755927603500, end: 1755927603500 });
   });
 });

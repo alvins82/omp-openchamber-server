@@ -8,6 +8,7 @@ import type {
   OpenCodePromptTextPart,
   ToolPartState,
   TokenBreakdown,
+  TurnTelemetry,
 } from "./providers/types";
 import { promptLogger } from "./logger";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
@@ -347,6 +348,7 @@ function emitAssistantInfo(
   tokens?: TokenBreakdown,
   cost?: number,
   error?: unknown,
+  telemetry?: TurnTelemetry,
 ): void {
   const dir = cwd || process.cwd();
   const created = createdTime ?? Date.now();
@@ -360,6 +362,7 @@ function emitAssistantInfo(
       mode: "primary",
       cost: cost ?? 0,
       path: { cwd: dir, root: dir },
+      metadata: telemetry ? { omp: telemetry } : undefined,
       tokens: tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       model: {
         id: model.modelID,
@@ -423,6 +426,7 @@ export function createEventHandler(
   let activePartText = "";
   let partIndex = 0;
   let hasStarted = false;
+  let turnTelemetry: TurnTelemetry | undefined;
 
   const toolParts = new Map<string, { tool: string; state: ToolPartState }>();
 
@@ -506,6 +510,8 @@ export function createEventHandler(
       assistantStartTime,
       latestTokens,
       latestCost,
+      undefined,
+      turnTelemetry,
     );
   };
 
@@ -521,6 +527,11 @@ export function createEventHandler(
         model.providerID = event.model.providerID;
         model.modelID = event.model.modelID;
         model.variant = event.model.variant;
+        emitUsageInfo();
+        return;
+      }
+      case "telemetry": {
+        turnTelemetry = event.telemetry;
         emitUsageInfo();
         return;
       }
@@ -690,12 +701,13 @@ export function createEventHandler(
               latestTokens,
               latestCost,
               rawError ? { message: rawError } : { message: "Turn ended with error" },
+              turnTelemetry,
             );
           }
           emitSessionError(openCodeId, { message: rawError || "Turn ended with error" }, cwd);
         } else {
           if (assistantMessageID) {
-            emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost);
+            emitAssistantInfo(openCodeId, assistantMessageID, parentMessageID, model, "stop", cwd, assistantStartTime, latestTokens, latestCost, undefined, turnTelemetry);
           }
         }
         onComplete();
