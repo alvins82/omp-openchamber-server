@@ -267,8 +267,9 @@ export type NormalizedTurnEvent =
       agent?: string;
       description?: string;
       sessionFile?: string;
-    }
+  }
   | { kind: "subagent_ended"; childId: string }
+  | { kind: "subagent_failed"; childId: string; message?: string }
   | { kind: "subagent_status"; childId: string; status: SubagentStatus }
   | { kind: "todo"; todos: OpenCodeTodo[] }
   | { kind: "compaction_start"; reason?: string; action?: string }

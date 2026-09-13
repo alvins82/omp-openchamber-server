@@ -173,6 +173,18 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(statusIdleEvts.length).toBeGreaterThan(0);
     expect(getSessionStatusMap()["ses_subworker1"]).toBeUndefined();
 
+    // 3. A failed child emits an error terminal event before settling idle.
+    transport.feed({
+      type: "subagent_lifecycle",
+      payload: {
+        id: "sub-worker-1",
+        status: "failed",
+        error: { message: "provider unavailable" },
+      },
+    } as unknown as OmpRpcEvent);
+    expect(events.some((event) => event.type === "session.error" && event.properties.sessionID === "ses_subworker1")).toBe(true);
+    expect(events.some((event) => event.type === "session.status" && event.properties.sessionID === "ses_subworker1" && (event.properties.status as { type?: string }).type === "idle")).toBe(true);
+
     unsub();
   });
 

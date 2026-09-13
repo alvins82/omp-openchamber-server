@@ -56,6 +56,11 @@ Provider and transport failures use a terminal `message.updated` with
 acknowledgement, the terminal event wins and the sidecar emits no second
 assistant completion.
 
+Subagent failures follow the same terminal event contract. A child reported as
+failed emits `session.error` with the provider message, then an idle status so
+the child leaves the active set without being mistaken for a successful
+completion. Completed children continue to emit idle status only.
+
 ---
 
 ## 3. Message & Part Data Structures
