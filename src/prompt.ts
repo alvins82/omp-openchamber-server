@@ -585,6 +585,17 @@ export function createEventHandler(
         }, cwd);
         return;
       }
+      case "subagent_failed": {
+        setSubagentStatus(event.childId, undefined, subagentScope);
+        emitSessionError(event.childId, { message: event.message ?? "Subagent failed" }, cwd);
+        emitSessionStatus(event.childId, { type: "idle" }, cwd);
+        emitSessionUpdated({
+          id: event.childId,
+          parentID: openCodeId,
+          time: { updated: Date.now() },
+        }, cwd);
+        return;
+      }
       case "subagent_status": {
         if (event.status === "busy") {
           setSubagentStatus(event.childId, { type: "busy" }, subagentScope);

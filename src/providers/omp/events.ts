@@ -739,6 +739,12 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
             description,
             sessionFile,
           });
+        } else if (status === "error" || status === "failed" || status === "aborted") {
+          emit({
+            kind: "subagent_failed",
+            childId,
+            message: errorMessageOf(payload.error) ?? errorMessageOf(payload.errorMessage) ?? errorMessageOf(payload.reason),
+          });
         } else {
           emit({ kind: "subagent_ended", childId });
         }
@@ -758,7 +764,13 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
         const status = String(progress.status ?? "");
         if (status === "running" || status === "busy") {
           emit({ kind: "subagent_status", childId, status: "busy" });
-        } else if (status === "completed" || status === "error" || status === "aborted") {
+        } else if (status === "error" || status === "failed" || status === "aborted") {
+          emit({
+            kind: "subagent_failed",
+            childId,
+            message: errorMessageOf(progress.error) ?? errorMessageOf(payload.error) ?? errorMessageOf(progress.reason),
+          });
+        } else if (status === "completed") {
           emit({ kind: "subagent_status", childId, status: "idle" });
         }
       }

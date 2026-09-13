@@ -531,6 +531,20 @@ describe("subagent mapping", () => {
     expect(h.events[0].status).toBe("busy");
     expect(h.events[1].status).toBe("idle");
   });
+
+  test("failed progress frames preserve the child failure", () => {
+    const h = createHarness();
+    h.feed({
+      type: "subagent_progress",
+      payload: { progress: { id: "child-3", status: "error", error: { message: "provider unavailable" } } },
+    } as unknown as OmpRpcEvent);
+
+    expect(h.events).toEqual([{
+      kind: "subagent_failed",
+      childId: toOpenCodeSessionId("child-3"),
+      message: "provider unavailable",
+    }]);
+  });
 });
 
 describe("delta passthrough", () => {
