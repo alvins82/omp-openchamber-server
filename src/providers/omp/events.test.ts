@@ -133,6 +133,45 @@ describe("usage aggregation", () => {
     expect(usage[1].tokens.input).toBe(20);
     expect(usage[1].tokens.output).toBe(0); // wholesale replacement, not merge
   });
+
+  test("aggregates completed assistant request telemetry separately from the latest usage snapshot", () => {
+    const h = createHarness();
+    h.feed({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        usage: { input: 10, output: 5, reasoning: 2, cache_read: 3 },
+        duration: 100,
+        ttft: 20,
+      },
+    } as unknown as OmpRpcEvent);
+    h.feed({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        usage: { input: 30, output: 7, reasoning: 4, cache_read: 11 },
+        duration: 300,
+        ttft: 80,
+      },
+    } as unknown as OmpRpcEvent);
+
+    const telemetry = h.events.filter((event) => event.kind === "telemetry");
+    expect(telemetry).toHaveLength(2);
+    expect(telemetry.at(-1)).toEqual({
+      kind: "telemetry",
+      telemetry: {
+        turnUsage: {
+          input: 40,
+          output: 12,
+          reasoning: 6,
+          cache: { read: 14, write: 0 },
+        },
+        modelDurationMs: 400,
+        ttftMs: 100,
+        ttftSamples: 2,
+      },
+    });
+  });
 });
 
 describe("model sync", () => {

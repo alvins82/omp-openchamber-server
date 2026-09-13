@@ -85,6 +85,15 @@ interface MessageRecord {
       created: number;
       completed?: number;
     };
+    metadata?: {
+      omp?: {
+        // Aggregates the raw model requests collated into this assistant record.
+        turnUsage?: TokenBreakdown;
+        modelDurationMs?: number;
+        ttftMs?: number;
+        ttftSamples?: number;
+      };
+    };
   };
   parts: MessagePart[];
 }

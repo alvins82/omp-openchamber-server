@@ -127,6 +127,47 @@ describe("golden turn sequence (event handler -> SSE)", () => {
     expect(done).toBe(1);
   });
 
+  it("forwards aggregate model telemetry into the finalized assistant metadata", () => {
+    runTurn([
+      textDelta("answer"),
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          usage: { input: 10, output: 5, reasoning: 2, cache_read: 3 },
+          duration: 100,
+          ttft: 20,
+        },
+      } as unknown as OmpRpcEvent,
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          usage: { input: 30, output: 7, reasoning: 4, cache_read: 11 },
+          duration: 300,
+          ttft: 80,
+        },
+      } as unknown as OmpRpcEvent,
+      agentEnd(),
+    ]);
+
+    const finalMessageUpdatedEvt = got.filter((event) => event.type === "message.updated").at(-1);
+    expect(finalMessageUpdatedEvt).toBeDefined();
+    expect((finalMessageUpdatedEvt!.properties.info as Record<string, unknown>).metadata).toEqual({
+      omp: {
+        turnUsage: {
+          input: 40,
+          output: 12,
+          reasoning: 6,
+          cache: { read: 14, write: 0 },
+        },
+        modelDurationMs: 400,
+        ttftMs: 100,
+        ttftSamples: 2,
+      },
+    });
+  });
+
   it("thinking then text splits into ordered reasoning and text parts and finalizes reasoning with time.end", () => {
     runTurn([thinkDelta("why"), textDelta("because"), agentEnd()]);
     expect(got).toHaveLength(5);

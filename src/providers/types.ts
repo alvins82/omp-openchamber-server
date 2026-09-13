@@ -76,6 +76,14 @@ export interface TokenBreakdown {
   };
 }
 
+/** Aggregate timing and usage for the raw model requests in one visible turn. */
+export interface TurnTelemetry {
+  turnUsage?: TokenBreakdown;
+  modelDurationMs?: number;
+  ttftMs?: number;
+  ttftSamples?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Prompt body image content
 // ---------------------------------------------------------------------------
@@ -198,6 +206,7 @@ export interface OpenCodeMessageRecord {
     variant?: string;
     mode?: string;
     path?: { cwd: string; root: string };
+    metadata?: Record<string, unknown>;
     cost?: number;
     tokens?: {
       input: number;
@@ -224,6 +233,9 @@ export interface OpenCodeMessageRecord {
 //  - The backend OWNS usage/model aggregation: a `usage` event is a full
 //    snapshot (tokens replace-if-positive happens backend-side) and MUST be
 //    emitted before the terminal `turn_end`. The sink stores snapshots as-is.
+//  - A `telemetry` event is an aggregate over completed raw model requests in
+//    the current visible turn. The sink stores it in a namespaced message
+//    metadata field so it cannot be confused with the final context snapshot.
 //  - Respond closures for approval/question requests are bound to the
 //    backend transport INSIDE the backend; the sink only decorates them with
 //    SSE bookkeeping.
@@ -246,6 +258,7 @@ export type NormalizedTurnEvent =
   | { kind: "reasoning_delta"; text: string }
   | { kind: "tool"; callID: string; tool?: string; state: ToolPartState }
   | { kind: "usage"; tokens: TokenBreakdown; cost: number }
+  | { kind: "telemetry"; telemetry: TurnTelemetry }
   | { kind: "model"; model: ModelRef }
   | {
       kind: "permission_request";

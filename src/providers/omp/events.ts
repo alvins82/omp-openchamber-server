@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
-import type { ModelRef, NormalizedTurnEvent, ToolPartState, TokenBreakdown } from "../types";
+import type { ModelRef, NormalizedTurnEvent, ToolPartState, TokenBreakdown, TurnTelemetry } from "../types";
 import { invalidateMessageCache, mapOmpUsageToTokens } from "./messages";
 import { readSessionHeader, readSessionIdSync, toOpenCodeSessionId } from "./store";
 import { extractTodosFromOmpDetails, isTodoTool } from "./todo";
@@ -394,6 +394,60 @@ function stopReasonOf(event: OmpRpcEvent): string | undefined {
   return typeof message?.stopReason === "string" ? message.stopReason : undefined;
 }
 
+function hasTokenUsage(tokens: TokenBreakdown): boolean {
+  return tokens.input > 0
+    || tokens.output > 0
+    || tokens.reasoning > 0
+    || tokens.cache.read > 0
+    || tokens.cache.write > 0;
+}
+
+function nonnegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function getCompletedAssistantTelemetry(event: OmpRpcEvent): TurnTelemetry | undefined {
+  if (event.type !== "message_end") return undefined;
+  const message = messagePayloadOf(event);
+  if (message?.role !== "assistant") return undefined;
+
+  const mapped = mapOmpUsageToTokens(message.usage, message.cost);
+  const modelDurationMs = nonnegativeNumber(message.duration);
+  const ttftMs = nonnegativeNumber(message.ttft);
+  const validTtft = ttftMs !== undefined && (modelDurationMs === undefined || ttftMs <= modelDurationMs);
+  if (!hasTokenUsage(mapped.tokens) && modelDurationMs === undefined && !validTtft) return undefined;
+
+  return {
+    ...(hasTokenUsage(mapped.tokens) ? { turnUsage: mapped.tokens } : {}),
+    ...(modelDurationMs !== undefined ? { modelDurationMs } : {}),
+    ...(validTtft ? { ttftMs, ttftSamples: 1 } : {}),
+  };
+}
+
+function addTurnTelemetry(current: TurnTelemetry | undefined, incoming: TurnTelemetry): TurnTelemetry {
+  const currentUsage = current?.turnUsage;
+  const incomingUsage = incoming.turnUsage;
+  const turnUsage = currentUsage || incomingUsage
+    ? {
+        input: (currentUsage?.input ?? 0) + (incomingUsage?.input ?? 0),
+        output: (currentUsage?.output ?? 0) + (incomingUsage?.output ?? 0),
+        reasoning: (currentUsage?.reasoning ?? 0) + (incomingUsage?.reasoning ?? 0),
+        cache: {
+          read: (currentUsage?.cache.read ?? 0) + (incomingUsage?.cache.read ?? 0),
+          write: (currentUsage?.cache.write ?? 0) + (incomingUsage?.cache.write ?? 0),
+        },
+      }
+    : undefined;
+  const hasModelDuration = current?.modelDurationMs !== undefined || incoming.modelDurationMs !== undefined;
+  const ttftSamples = (current?.ttftSamples ?? 0) + (incoming.ttftSamples ?? 0);
+
+  return {
+    ...(turnUsage ? { turnUsage } : {}),
+    ...(hasModelDuration ? { modelDurationMs: (current?.modelDurationMs ?? 0) + (incoming.modelDurationMs ?? 0) } : {}),
+    ...(ttftSamples > 0 ? { ttftMs: (current?.ttftMs ?? 0) + (incoming.ttftMs ?? 0), ttftSamples } : {}),
+  };
+}
+
 function fieldOf(event: OmpRpcEvent, field: string): unknown {
   if (event[field] !== undefined) return event[field];
   return messagePayloadOf(event)?.[field];
@@ -409,6 +463,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
   let sink: ((event: NormalizedTurnEvent) => void) | undefined;
   let latestTokens: TokenBreakdown = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
   let latestCost = 0;
+  let turnTelemetry: TurnTelemetry | undefined;
   const toolParts = new Map<string, { tool: string; state: ToolPartState }>();
   const subagentSessionIds = new Map<string, string>();
   let nonTerminalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -477,6 +532,11 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
       }
     }
 
+    const completedAssistantTelemetry = getCompletedAssistantTelemetry(event);
+    if (completedAssistantTelemetry) {
+      turnTelemetry = addTurnTelemetry(turnTelemetry, completedAssistantTelemetry);
+    }
+
     // 2. Model sync: adopt provider/model announcements from message-ish frames.
     const rawMsg = (messagePayloadOf(event) || event.data || event.assistantMessageEvent) as Record<string, unknown> | undefined;
     let modelChanged = false;
@@ -515,6 +575,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
 
     // 4. Snapshots must reach the sink before the terminal turn_end.
     if (usageUpdated) emit({ kind: "usage", tokens: latestTokens, cost: latestCost });
+    if (completedAssistantTelemetry && turnTelemetry) emit({ kind: "telemetry", telemetry: turnTelemetry });
     if (modelChanged) emit({ kind: "model", model: { ...model } });
 
     const stopReason = stopReasonOf(event);
@@ -860,6 +921,7 @@ export function createOmpEventNormalizer(ctx: OmpEventNormalizerContext): OmpEve
       sink = next;
       latestTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
       latestCost = 0;
+      turnTelemetry = undefined;
       toolParts.clear();
       clearTimer();
       return () => {
