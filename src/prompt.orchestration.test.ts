@@ -8,9 +8,10 @@ import {
   shutdownAll,
 } from "./prompt";
 import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
+import { resetCredentialResolver, setCredentialResolver } from "./providers/omp/credentials";
 import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
 import type { OmpRpcEvent, OmpRpcTransport } from "./providers/omp/rpc";
-import type { BackendSubagentStatus } from "./providers/types";
+import type { BackendCredentials, BackendSubagentStatus } from "./providers/types";
 
 /**
  * Fake OMP transport for orchestration tests. Records every RPC and lets the
@@ -86,6 +87,7 @@ let seq = 0;
 afterEach(() => {
   shutdownAll();
   resetOmpTransportFactory();
+  resetCredentialResolver();
 });
 
 function installFakeFactory() {
@@ -112,6 +114,83 @@ function lastTransport(): FakeTransport {
   expect(t).toBeDefined();
   return t!;
 }
+
+test("passes direct caller-owned credentials only to the OMP transport path", async () => {
+  let receivedCredential: BackendCredentials | undefined;
+  setOmpTransportFactory(async (_cwd, sessionPath, credential) => {
+    receivedCredential = credential;
+    const t = new FakeTransport();
+    created.push(t);
+    await t.switchSession(sessionPath);
+    return t;
+  });
+
+  const { openCodeId, cwd, sessionPath } = newSession();
+  const result = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+    parts: [{ type: "text", text: "use the caller-owned key" }],
+    model: { providerID: "vllm", modelID: "qwen" },
+    credentials: {
+      apiKey: "secret-key",
+      baseUrl: "http://127.0.0.1:8080/v1",
+    },
+  });
+
+  expect(result).toEqual({ queued: true });
+  await waitFor(() => receivedCredential !== undefined);
+  expect(receivedCredential).toEqual({
+    providerID: "vllm",
+    apiKey: "secret-key",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    api: undefined,
+    auth: undefined,
+    authHeader: undefined,
+    headers: undefined,
+    models: undefined,
+  });
+  await completePrompt(lastTransport(), openCodeId, cwd);
+});
+
+test("resolves credentialRef before creating the OMP transport", async () => {
+  let receivedCredential: BackendCredentials | undefined;
+  let resolverCalls = 0;
+  setCredentialResolver(async (ref, context) => {
+    resolverCalls += 1;
+    expect(ref).toBe("cred_workspace_1");
+    expect(context.providerID).toBe("vllm");
+    expect(context.modelID).toBe("qwen");
+    return { providerID: "vllm", apiKey: "resolved-key" };
+  });
+  setOmpTransportFactory(async (_cwd, sessionPath, credential) => {
+    receivedCredential = credential;
+    const t = new FakeTransport();
+    created.push(t);
+    await t.switchSession(sessionPath);
+    return t;
+  });
+
+  const { openCodeId, cwd, sessionPath } = newSession();
+  const result = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+    parts: [{ type: "text", text: "use the referenced key" }],
+    model: { providerID: "vllm", modelID: "qwen" },
+    credentialRef: "cred_workspace_1",
+  });
+
+  expect(result).toEqual({ queued: true });
+  await waitFor(() => receivedCredential !== undefined);
+  expect(receivedCredential).toMatchObject({ providerID: "vllm", apiKey: "resolved-key" });
+  const transport = lastTransport();
+  await completePrompt(transport, openCodeId, cwd);
+
+  const second = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+    parts: [{ type: "text", text: "continue with the referenced key" }],
+    model: { providerID: "vllm", modelID: "qwen" },
+    credentialRef: "cred_workspace_1",
+  });
+  expect(second).toEqual({ queued: true });
+  expect(lastTransport()).toBe(transport);
+  expect(resolverCalls).toBe(1);
+  await completePrompt(transport, openCodeId, cwd);
+});
 
 function captureEvents() {
   // The production envelope keeps `properties` opaque; tests access the

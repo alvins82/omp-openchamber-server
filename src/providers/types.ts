@@ -61,6 +61,53 @@ export interface ModelRef {
   variant: string;
 }
 
+// ---------------------------------------------------------------------------
+// Optional caller-owned model credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * Provider configuration supplied by a trusted caller for one OMP runtime.
+ *
+ * This is deliberately a small OpenAI/OMP model-config-shaped envelope rather
+ * than an AuthStorage implementation. The sidecar only uses it when the
+ * request includes `credentials` or `credentialRef`; otherwise OMP keeps its
+ * normal host-local credential resolution behavior.
+ */
+export interface BackendCredentials {
+  /** OMP provider id. Inferred from the selected model when omitted. */
+  providerID?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  api?: string;
+  auth?: "apiKey" | "none" | "oauth";
+  authHeader?: boolean;
+  headers?: Record<string, string>;
+  compat?: Record<string, unknown>;
+  remoteCompaction?: Record<string, unknown>;
+  discovery?: Record<string, unknown>;
+  modelOverrides?: Record<string, Record<string, unknown>>;
+  disableStrictTools?: boolean;
+  guardrailIdentifier?: string;
+  guardrailVersion?: string;
+  guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+  transport?: "pi-native";
+  /** Optional custom OMP model definitions for providers outside OMP's catalog. */
+  models?: Array<Record<string, unknown>>;
+}
+
+/**
+ * Per-request credential input. `credentialRef` is opaque to OMP and is
+ * resolved by the sidecar's configured credential resolver before the child
+ * process starts. Raw credentials are never sent in the OMP RPC prompt.
+ */
+export interface BackendCredentialInput {
+  credentials?: BackendCredentials;
+  credentialRef?: string;
+  /** Internal model context used when resolving an opaque ref. */
+  selectedProviderID?: string;
+  selectedModelID?: string;
+}
+
 /** Model ref as persisted in session records (adds the display id). */
 export interface SessionModelRef extends ModelRef {
   id: string;
@@ -315,6 +362,8 @@ export interface BackendTurnConnection {
   onEvent(sink: (event: NormalizedTurnEvent) => void): () => void;
   prompt(input: TurnPromptInput): Promise<unknown>;
   setModel(providerID: string, modelID: string): Promise<unknown>;
+  /** Compacts through the existing backend connection when supported. */
+  compact?(): Promise<unknown>;
   /** Model currently configured on the backend session, if discoverable. */
   getInitialModel?(): Promise<ModelRef | undefined>;
   /** Current subagent snapshot, used to recover missed lifecycle events. */
@@ -367,12 +416,13 @@ export interface AgentBackend {
   label: string;
   capabilities: BackendCapabilities;
   defaultModel: ModelRef;
-  listModels(cwd: string): Promise<OpenCodeProvidersResponse>;
+  listModels(cwd: string, auth?: BackendCredentialInput): Promise<OpenCodeProvidersResponse>;
   store: SessionStore;
   createTurnConnection(
     cwd: string,
     sessionPath: string,
     openCodeId: string,
+    auth?: BackendCredentialInput,
   ): Promise<BackendTurnConnection>;
   shutdownAll(): void;
 }

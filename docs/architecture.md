@@ -67,6 +67,7 @@ The adapter seam that lets the sidecar serve multiple agent backends behind one 
 - Resolves `OMP_BIN` only as an explicit test/development override; otherwise it uses the staged project-owned binary and never searches PATH or common install directories.
 - **Persistent Children**: Maintained per `(sessionID, directory)` pair for conversational prompt turns.
 - **Ephemeral Children**: Spawned on-demand with automatic teardown for one-shot commands (e.g. `/config/providers`).
+- **Caller-owned credentials**: When a prompt or `POST /config/providers` includes `credentials` or `credentialRef`, the sidecar creates a private temporary `PI_CODING_AGENT_DIR` containing only that child's generated `models.yml`; the normal no-auth path inherits the existing OMP environment unchanged.
 - **Resilience & Gating**:
   - Gated on the first successful RPC response to a `get_state` probe rather than the `ready` frame, avoiding stalls caused by third-party LSP or MCP initialization.
   - Spawns children in detached process groups so parent termination cleanly tears down all descendant processes.

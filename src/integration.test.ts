@@ -384,6 +384,42 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(spawnLogLines()).toBe(before + 1);
   });
 
+  test("POST /config/providers uses caller-owned credentials without changing the legacy GET cache", async () => {
+    const before = spawnLogLines();
+    const response = await fetch(BASE + "config/providers?directory=" + encodeURIComponent(DIR_A), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: { providerID: "sidevllm", modelID: "qwen" },
+        credentials: { apiKey: "test-only-key" },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { providers?: Array<{ id: string }> };
+    expect(body.providers?.some((provider) => provider.id === "sidevllm")).toBe(true);
+    expect(spawnLogLines()).toBe(before + 1);
+
+    // The existing GET route remains backed by its pre-existing ambient cache.
+    const legacy = await fetch(BASE + "config/providers?directory=" + encodeURIComponent(DIR_A));
+    expect(legacy.status).toBe(200);
+    expect(spawnLogLines()).toBe(before + 1);
+  });
+
+  test("POST /config/providers rejects an unresolved credentialRef without spawning OMP", async () => {
+    const before = spawnLogLines();
+    const response = await fetch(BASE + "config/providers?directory=" + encodeURIComponent(DIR_A), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: { providerID: "sidevllm", modelID: "qwen" },
+        credentialRef: "vault://missing",
+      }),
+    });
+    expect(response.status).toBe(424);
+    expect((await response.json()).error).toContain("no credential resolver");
+    expect(spawnLogLines()).toBe(before);
+  });
+
   test("PATCH /config and GET /config persist and return configuration", async () => {
     const patchRes = await fetch(BASE + "config", {
       method: "PATCH",

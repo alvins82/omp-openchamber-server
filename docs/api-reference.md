@@ -340,9 +340,22 @@ Enqueues a turn prompt to the OMP child process.
   "model": {
     "providerID": "llama.cpp",
     "modelID": "qwen3.8-27b"
+  },
+  "credentials": {
+    "apiKey": "...",
+    "baseUrl": "https://api.example.com/v1"
   }
 }
 ```
+
+`credentials` is optional and is only used when supplied. Instead of raw
+credentials, send `credentialRef` with an opaque reference owned by the host
+application. Send exactly one of these fields, never both. The sidecar
+resolves the envelope before starting the OMP child; requests without either
+field retain OMP's existing host-local provider configuration. See
+[`providers.md`](providers.md#caller-owned-credentials-opt-in) for the
+credential shape and resolver contract.
+
 - **Response `200 OK`**: `{"queued": true}`
 - **Response `409 Conflict`**: `{"error": "session busy"}` (if a turn is already executing on this session).
 
@@ -382,6 +395,27 @@ Queries the OMP model catalog and formats it for OpenChamber.
   }
 }
 ```
+
+### `POST /config/providers`
+Queries the model catalog using caller-owned credentials. This is the opt-in
+counterpart to the legacy `GET` route and is useful for a provider settings
+screen.
+
+- **Request Body**:
+```json
+{
+  "model": {
+    "providerID": "openai",
+    "modelID": "gpt-5"
+  },
+  "credentialRef": "vault://team-a/openai"
+}
+```
+
+Use either `credentialRef` or a `credentials` object, but not both. The
+response has the same `OpenCodeProvidersResponse` shape as `GET
+/config/providers`. A resolver failure is returned as a JSON error with an
+appropriate `4xx`/`5xx` status.
 
 ### `GET /config` · `GET /global/config`
 Returns current configuration objects.
