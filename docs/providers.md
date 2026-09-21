@@ -18,9 +18,9 @@ Defined in `src/providers/types.ts`.
 | `label` | string | Display name. |
 | `capabilities` | `BackendCapabilities` | Feature matrix; gates backend-specific routes (below). |
 | `defaultModel` | `ModelRef` | Used when the client omits `model`. |
-| `listModels(cwd)` | → `OpenCodeProvidersResponse` | Provider/model catalog for the `/provider` surface. |
+| `listModels(cwd, auth?)` | → `OpenCodeProvidersResponse` | Provider/model catalog for the `/provider` surface; `auth` is opt-in caller-owned credentials. |
 | `store` | `SessionStore` | Persistent session storage owned by this backend. |
-| `createTurnConnection(cwd, sessionPath, openCodeId)` | → `BackendTurnConnection` | One live turn connection for a session. |
+| `createTurnConnection(cwd, sessionPath, openCodeId, auth?)` | → `BackendTurnConnection` | One live turn connection for a session; `auth` is opt-in caller-owned credentials. |
 | `shutdownAll()` | void | Tear down all transport processes on sidecar shutdown. |
 
 ### `SessionStore` — session persistence
@@ -104,6 +104,67 @@ their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 `thinkingLevels`, `images`, `approvals`, `subagents`, and `skills` are declared
 in the matrix but not yet consulted by any route; they exist so backends can
 declare intent without a contract change later.
+
+## Caller-owned credentials (opt-in)
+
+The sidecar can run one OMP child with credentials supplied by its caller. This
+is intended for a host application that owns provider configuration, such as a
+settings UI or a credential broker. It does not change OMP's normal behavior
+unless the request contains exactly one of `credentials` or `credentialRef`.
+
+Prompt requests can include either envelope:
+
+```json
+{
+  "parts": [{ "type": "text", "text": "List the files" }],
+  "model": { "providerID": "openai", "modelID": "gpt-5" },
+  "credentials": {
+    "apiKey": "...",
+    "baseUrl": "https://api.example.com/v1",
+    "headers": { "X-Tenant": "tenant-a" }
+  }
+}
+```
+
+or:
+
+```json
+{
+  "parts": [{ "type": "text", "text": "List the files" }],
+  "model": { "providerID": "openai", "modelID": "gpt-5" },
+  "credentialRef": "vault://team-a/openai"
+}
+```
+
+`providerID` is optional inside `credentials` when a selected model provides
+it. If it is present, it must match the selected model's native OMP provider
+ID. The envelope follows OMP's provider section and supports `providerID`,
+`apiKey`, `baseUrl`, `api`, `auth`, `authHeader`, `headers`, `compat`,
+`discovery`, `remoteCompaction`, `modelOverrides`, `disableStrictTools`,
+Bedrock guardrail fields, `transport`, and optional OMP `models` definitions.
+
+`credentialRef` is opaque to OMP. Install a process-local resolver with
+`setCredentialResolver`, or configure an HTTP resolver with
+`OC_CREDENTIAL_RESOLVER_URL` and optional `OC_CREDENTIAL_RESOLVER_TOKEN`. The
+HTTP resolver receives `{ credentialRef, providerID, modelID, cwd,
+openCodeId }` and returns either the credential object directly or under a
+`credentials`/`credential` property.
+
+The same reference reuses the session's persistent credentialed child. To
+force a refreshed credential, send a new reference value or start a new
+session; a changed direct credential payload also replaces the child.
+
+`POST /config/providers` accepts the same credential envelope plus an optional
+`model` object and returns the catalog discovered by an isolated OMP child.
+This lets a settings UI discover models without changing the legacy
+`GET /config/providers` behavior.
+
+Raw credentials are not written to session records or sent in OMP prompt RPC
+frames. For a credentialed child, the sidecar creates a private temporary
+`PI_CODING_AGENT_DIR` with a generated `models.yml`, then removes it when the
+child exits. Cleanup is best effort if the host process is terminated abruptly;
+the resolver mode is preferred when the sidecar should not receive long-lived
+secrets at all.
 
 ## Fake Backend (`src/providers/fake/backend.ts`)
 

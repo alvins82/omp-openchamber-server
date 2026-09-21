@@ -28,6 +28,7 @@ import {
 import {
   promptSessionAsync,
   abortSession,
+  compactSession,
   getSessionStatusMap,
   reconcileSessionStatuses,
   removeSessionState,
@@ -39,7 +40,8 @@ import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
 import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion, setExplicitOmpBinary } from "./providers/omp/binary";
 import { startOmpUpdateChecker } from "./providers/omp/update-check";
 import { parseCliArgs, printHelp, type SidecarCliOptions } from "./cli";
-import type { OpenCodeProvidersResponse } from "./providers/types";
+import type { BackendCredentialInput, OpenCodeProvidersResponse } from "./providers/types";
+import { CredentialInputError } from "./providers/omp/credentials";
 import { logger, httpLogger } from "./logger";
 import { join, isAbsolute, basename, extname } from "node:path";
 import { homedir } from "node:os";
@@ -1469,9 +1471,19 @@ const MIME_TYPES: Record<string, string> = {
         const { backend, session } = await resolveSessionRoute(compactMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
         if (!backend.capabilities.compact) return jsonError("summarize not supported by backend", 501);
-        await withOmpRpc(session.directory, async (conn) => {
-          await conn.request("compact", {});
-        }).catch(() => {});
+        let usedPersistentConnection = false;
+        try {
+          usedPersistentConnection = await compactSession(session.id, session.directory);
+        } catch {
+          // Preserve the legacy best-effort compact behavior when the current
+          // persistent child rejects the RPC; do not fall back to ambient auth.
+          usedPersistentConnection = true;
+        }
+        if (!usedPersistentConnection) {
+          await withOmpRpc(session.directory, async (conn) => {
+            await conn.request("compact", {});
+          }).catch(() => {});
+        }
         invalidateMessageCache(session.id, session.directory);
         emitSessionCompacted(session.id, session.directory);
         return json(true);
@@ -1626,6 +1638,46 @@ const MIME_TYPES: Record<string, string> = {
         const response = await fetchProvidersForDirectory(cwd);
         return json(response);
       } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "providers failed", 500);
+      }
+    }
+
+    // Opt-in caller-owned provider catalog. The legacy GET above continues to
+    // use OMP's normal host-local configuration. A POST is intentionally
+    // separate so credentials can never silently alter that behavior.
+    if (p === "/config/providers" && req.method === "POST") {
+      try {
+        const body = asRecord(await readJson(req));
+        const hasCredentials = body?.credentials !== undefined;
+        const hasCredentialRef = body?.credentialRef !== undefined;
+        if (hasCredentials === hasCredentialRef) {
+          return jsonError("provide exactly one of credentials or credentialRef", 400);
+        }
+
+        const model = asRecord(body?.model);
+        const requestedProviderID = typeof model?.providerID === "string" ? model.providerID : undefined;
+        const requestedModelID = typeof model?.modelID === "string" ? model.modelID : undefined;
+        const providerSelection = requestedProviderID ? splitProviderPrefix(requestedProviderID) : undefined;
+        const selectedBackend = providerSelection?.backendId
+          ? backendById(providerSelection.backendId)
+          : defaultBackend();
+        if (!selectedBackend) return jsonError("unknown model backend", 400);
+
+        const auth: BackendCredentialInput = hasCredentials
+          ? {
+              credentials: body?.credentials as BackendCredentialInput["credentials"],
+              selectedProviderID: providerSelection?.native,
+              selectedModelID: requestedModelID,
+            }
+          : {
+              credentialRef: body?.credentialRef as string,
+              selectedProviderID: providerSelection?.native,
+              selectedModelID: requestedModelID,
+            };
+        const response = await selectedBackend.listModels(dir ?? process.cwd(), auth);
+        return json(response);
+      } catch (err) {
+        if (err instanceof CredentialInputError) return jsonError(err.message, err.statusCode);
         return jsonError(err instanceof Error ? err.message : "providers failed", 500);
       }
     }

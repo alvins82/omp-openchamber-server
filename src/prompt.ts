@@ -1,6 +1,7 @@
 import { allBackends, backendById, backendForSession, nativeProviderID, splitProviderPrefix } from "./providers/registry";
 import type {
   BackendSubagentSnapshot,
+  BackendCredentialInput,
   BackendTurnConnection,
   ImageContent,
   ModelRef,
@@ -10,6 +11,7 @@ import type {
   TokenBreakdown,
   TurnTelemetry,
 } from "./providers/types";
+import { CredentialInputError, credentialInputFingerprint } from "./providers/omp/credentials";
 import { promptLogger } from "./logger";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
 import {
@@ -56,6 +58,8 @@ interface PromptBody {
   messageID?: string;
   model?: { providerID?: string; modelID?: string };
   variant?: string;
+  credentials?: BackendCredentialInput["credentials"];
+  credentialRef?: string;
 }
 
 interface SessionState {
@@ -66,6 +70,8 @@ interface SessionState {
   sessionPath: string;
   unsubscribe: () => void;
   currentModel: ModelRef;
+  /** Hash of the explicit credential input that created this child, if any. */
+  credentialFingerprint?: string;
 }
 
 function sessionKey(openCodeId: string, cwd: string): string {
@@ -133,6 +139,10 @@ function isPromptBody(value: unknown): value is PromptBody {
     if ("modelID" in model && typeof model.modelID !== "string") return false;
   }
   if ("variant" in value && typeof value.variant !== "string") return false;
+  if ("credentials" in value) {
+    if (value.credentials === null || typeof value.credentials !== "object" || Array.isArray(value.credentials)) return false;
+  }
+  if ("credentialRef" in value && typeof value.credentialRef !== "string") return false;
   return true;
 }
 
@@ -721,12 +731,27 @@ async function getOrCreateSessionState(
   openCodeId: string,
   cwd: string,
   sessionPath: string,
+  auth?: BackendCredentialInput,
 ): Promise<SessionState> {
   const key = sessionKey(openCodeId, cwd);
+  const requestedCredentialFingerprint = auth ? credentialInputFingerprint(auth) : undefined;
   const existing = sessionStates.get(key);
-  if (existing) return existing;
+  if (existing) {
+    // Reuse a persistent child when the caller repeats the same envelope. A
+    // changed direct credential, provider selection, or opaque ref replaces
+    // the child so its isolated models.yml matches the new request.
+    const mustReplace = auth !== undefined && existing.credentialFingerprint !== requestedCredentialFingerprint;
+    if (!mustReplace) return existing;
 
-  const conn = await backendForSession(openCodeId).createTurnConnection(cwd, sessionPath, openCodeId);
+    existing.unsubscribe();
+    existing.conn.kill();
+    sessionStates.delete(key);
+  }
+
+  const backend = backendForSession(openCodeId);
+  const conn = auth === undefined
+    ? await backend.createTurnConnection(cwd, sessionPath, openCodeId)
+    : await backend.createTurnConnection(cwd, sessionPath, openCodeId, auth);
 
   const modelFromRpc = await conn.getInitialModel?.();
 
@@ -737,6 +762,7 @@ async function getOrCreateSessionState(
     cwd,
     sessionPath,
     unsubscribe: () => {},
+    credentialFingerprint: requestedCredentialFingerprint,
     currentModel: defaultModelRef({
       providerID: modelFromRpc?.providerID ?? "omp",
       modelID: modelFromRpc?.modelID ?? "omp",
@@ -774,11 +800,45 @@ export async function promptSessionAsync(
     return { queued: false, status: 400, error: "model provider does not belong to this session's backend" };
   }
 
+  const modelRef = body.model?.providerID && body.model?.modelID
+    ? {
+        providerID: nativeProviderID(body.model.providerID),
+        modelID: body.model.modelID,
+        variant: body.variant ?? "default",
+      }
+    : undefined;
+  const hasCredentials = body.credentials !== undefined;
+  const hasCredentialRef = body.credentialRef !== undefined;
+  if (hasCredentials && hasCredentialRef) {
+    return { queued: false, error: "provide exactly one of credentials or credentialRef", status: 400 };
+  }
+  const auth: BackendCredentialInput | undefined = hasCredentials
+    ? {
+        credentials: body.credentials,
+        selectedProviderID: modelRef?.providerID,
+        selectedModelID: modelRef?.modelID,
+      }
+    : hasCredentialRef
+      ? {
+          credentialRef: body.credentialRef,
+          selectedProviderID: modelRef?.providerID,
+          selectedModelID: modelRef?.modelID,
+        }
+      : undefined;
+
   const key = sessionKey(openCodeId, cwd);
   const release = await acquireSessionLock(key);
 
   try {
-    const state = await getOrCreateSessionState(openCodeId, cwd, sessionPath);
+    let state: SessionState;
+    try {
+      state = await getOrCreateSessionState(openCodeId, cwd, sessionPath, auth);
+    } catch (err) {
+      if (err instanceof CredentialInputError) {
+        return { queued: false, error: err.message, status: err.statusCode };
+      }
+      throw err;
+    }
 
     if (state.busy) {
       return { queued: false, error: "session busy", status: 409 };
@@ -789,13 +849,6 @@ export async function promptSessionAsync(
     emitSessionStatus(openCodeId, { type: "busy" }, cwd);
 
     const parentMessageID = body.messageID;
-    const modelRef = body.model?.providerID && body.model?.modelID
-      ? {
-          providerID: nativeProviderID(body.model.providerID),
-          modelID: body.model.modelID,
-          variant: body.variant ?? "default",
-        }
-      : undefined;
 
     if (modelRef) {
       state.currentModel = defaultModelRef(modelRef);
@@ -968,6 +1021,23 @@ export async function promptSessionAsync(
   } finally {
     release();
   }
+}
+
+/**
+ * Compact through a session's persistent connection only for credentialed
+ * sessions. This is important because spawning a separate ambient OMP child
+ * would silently lose the caller-owned provider configuration. Legacy
+ * sessions deliberately return false so the HTTP route keeps its old
+ * ephemeral-RPC behavior.
+ *
+ * Returns false when no persistent connection exists so the legacy caller can
+ * retain its existing ephemeral-RPC behavior.
+ */
+export async function compactSession(openCodeId: string, cwd: string): Promise<boolean> {
+  const state = sessionStates.get(sessionKey(openCodeId, cwd));
+  if (!state?.credentialFingerprint || !state.conn.compact) return false;
+  await state.conn.compact();
+  return true;
 }
 
 export async function abortSession(openCodeId: string, cwd: string): Promise<boolean> {

@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { OpenCodeModel, OpenCodeProvider, OpenCodeProvidersResponse } from "../types";
+import type { BackendCredentials, OpenCodeModel, OpenCodeProvider, OpenCodeProvidersResponse } from "../types";
 import { resolveOmpBinary } from "./binary";
+import { createOmpCredentialRuntime, type OmpCredentialRuntime } from "./credential-runtime";
 
 export function getSidecarExtensionPaths(): string[] {
   const extensionsDir = join(import.meta.dir, "..", "..", "..", "extensions");
@@ -84,6 +85,11 @@ export interface OmpRpcTransport {
   sendFrame?(frame: unknown): void;
 }
 
+export interface OmpRpcSpawnOptions {
+  /** Optional caller-owned credentials for this OMP child only. */
+  credential?: BackendCredentials;
+}
+
 export interface OmpRpcModel {
   provider: string;
   id: string;
@@ -129,6 +135,8 @@ export class OmpRpcConnection {
   #buffer = "";
   #ready: { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void };
   #dead = false;
+  #cleanup?: () => Promise<void> | void;
+  #cleanupStarted = false;
 
   static readonly #activeConnections = new Set<OmpRpcConnection>();
 
@@ -148,11 +156,13 @@ export class OmpRpcConnection {
     reader: ReadableStreamDefaultReader<Uint8Array>,
     detached: boolean,
     requestTimeoutMs: number = OmpRpcConnection.REQUEST_TIMEOUT_MS,
+    cleanup?: () => Promise<void> | void,
   ) {
     this.#proc = proc;
     this.#reader = reader;
     this.#detached = detached;
     this.#requestTimeoutMs = requestTimeoutMs;
+    this.#cleanup = cleanup;
     this.#ready = Promise.withResolvers<void>();
     // `ready` may never arrive (flaky subsystems can withhold it); a later
     // rejection of the already-abandoned promise must not crash the process.
@@ -183,27 +193,46 @@ export class OmpRpcConnection {
     );
   }
 
-  static async spawn(cwd: string, maxAttempts = 3): Promise<OmpRpcConnection> {
+  static async spawn(
+    cwd: string,
+    maxAttempts = 3,
+    options: OmpRpcSpawnOptions = {},
+  ): Promise<OmpRpcConnection> {
     const omp = resolveOmpBinary();
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let credentialRuntime: OmpCredentialRuntime | undefined;
+      let conn: OmpRpcConnection | undefined;
+      try {
+        credentialRuntime = options.credential
+          ? await createOmpCredentialRuntime(options.credential)
+          : undefined;
+      } catch (err) {
+        lastError = err;
+        break;
+      }
       // detached: the child leads its own process group so kill() can take
       // down MCP/LSP grandchildren instead of orphaning them.
       const extPaths = getSidecarExtensionPaths();
       const extArgs = extPaths.flatMap((p) => ["--extension", p]);
-      const proc = Bun.spawn(
-        [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...extArgs],
-        {
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "inherit",
-          detached: true,
-          env: { ...Bun.env, PI_NO_TITLE: "1", PI_SKIP_VERSION_CHECK: "1" },
-        },
-      );
-      const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-      const conn = new OmpRpcConnection(proc, reader, true);
       try {
+        const proc = Bun.spawn(
+          [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...extArgs],
+          {
+            stdin: "pipe",
+            stdout: "pipe",
+            stderr: "inherit",
+            detached: true,
+            env: {
+              ...Bun.env,
+              ...(credentialRuntime?.env ?? {}),
+              PI_NO_TITLE: "1",
+              PI_SKIP_VERSION_CHECK: "1",
+            },
+          },
+        );
+        const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+        conn = new OmpRpcConnection(proc, reader, true, OmpRpcConnection.REQUEST_TIMEOUT_MS, credentialRuntime?.cleanup);
         // Readiness is proven by the first real RPC response, not the
         // `ready` frame: OMP processes pre-`ready` frames in order, but
         // `ready` itself can be withheld by flaky subsystems (MCP servers,
@@ -225,7 +254,8 @@ export class OmpRpcConnection {
         return conn;
       } catch (err) {
         lastError = err;
-        conn.kill();
+        if (conn) conn.kill();
+        else await credentialRuntime?.cleanup().catch(() => {});
       }
     }
     throw lastError instanceof Error ? lastError : new Error(`OMP spawn failed: ${String(lastError)}`);
@@ -247,8 +277,23 @@ export class OmpRpcConnection {
       } finally {
         this.#dead = true;
         this.#fail(new Error("RPC process closed"));
+        this.#cleanupOnce();
       }
     })();
+  }
+
+  #cleanupOnce(): void {
+    if (this.#cleanupStarted) return;
+    this.#cleanupStarted = true;
+    const cleanup = this.#cleanup;
+    this.#cleanup = undefined;
+    if (!cleanup) return;
+    try {
+      const result = cleanup();
+      if (result instanceof Promise) result.catch(() => {});
+    } catch {
+      // Credential temp directories are best-effort cleanup after process exit.
+    }
   }
 
   #drain() {
@@ -383,6 +428,7 @@ export class OmpRpcConnection {
     OmpRpcConnection.#activeConnections.delete(this);
     this.#dead = true;
     this.#fail(new Error("RPC killed"));
+    this.#cleanupOnce();
     const pid = this.#proc.pid;
     if (this.#detached && pid > 0) {
       try {
@@ -403,8 +449,12 @@ export class OmpRpcConnection {
   }
 }
 
-export async function withOmpRpc<T>(cwd: string, fn: (conn: OmpRpcConnection) => Promise<T>): Promise<T> {
-  const conn = await OmpRpcConnection.spawn(cwd);
+export async function withOmpRpc<T>(
+  cwd: string,
+  fn: (conn: OmpRpcConnection) => Promise<T>,
+  options: OmpRpcSpawnOptions = {},
+): Promise<T> {
+  const conn = await OmpRpcConnection.spawn(cwd, 3, options);
   try {
     return await fn(conn);
   } finally {

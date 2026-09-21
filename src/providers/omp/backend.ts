@@ -10,11 +10,14 @@ import type {
   BackendCapabilities,
   BackendSubagentSnapshot,
   BackendTurnConnection,
+  BackendCredentialInput,
+  BackendCredentials,
   ModelRef,
   OpenCodeProvidersResponse,
   SessionStore,
   TurnPromptInput,
 } from "../types";
+import { resolveBackendCredentials } from "./credentials";
 import {
   OmpRpcConnection,
   getCurrentModel,
@@ -48,13 +51,27 @@ export interface OmpTurnContext {
   nonTerminalGraceMs?: number;
 }
 
-export type OmpTransportFactory = (cwd: string, sessionPath: string) => Promise<OmpRpcTransport>;
+export type OmpTransportFactory = (
+  cwd: string,
+  sessionPath: string,
+  credential?: BackendCredentials,
+) => Promise<OmpRpcTransport>;
 
-const defaultOmpTransportFactory: OmpTransportFactory = async (cwd, sessionPath) => {
-  const conn = await OmpRpcConnection.spawn(cwd);
-  await conn.switchSession(sessionPath);
-  await conn.request("set_subagent_subscription", { level: "events" }).catch(() => {});
-  return conn;
+const defaultOmpTransportFactory: OmpTransportFactory = async (cwd, sessionPath, credential) => {
+  const conn = credential
+    ? await OmpRpcConnection.spawn(cwd, 3, { credential })
+    : await OmpRpcConnection.spawn(cwd);
+  try {
+    await conn.switchSession(sessionPath);
+    await conn.request("set_subagent_subscription", { level: "events" }).catch(() => {});
+    return conn;
+  } catch (error) {
+    // Preserve the legacy failure path for ambient OMP auth, but never leave
+    // a credentialed child or its temporary config behind on initialization
+    // failure.
+    if (credential) conn.kill();
+    throw error;
+  }
 };
 
 let ompTransportFactory: OmpTransportFactory = defaultOmpTransportFactory;
@@ -122,6 +139,9 @@ export function createOmpTurnConnection(transport: OmpRpcTransport, ctx: OmpTurn
     },
     setModel(providerID: string, modelID: string) {
       return transport.request("set_model", { provider: providerID, modelId: modelID });
+    },
+    compact() {
+      return transport.request("compact", {});
     },
     async getInitialModel() {
       try {
@@ -213,16 +233,26 @@ export const ompBackend: AgentBackend = {
   capabilities: ompCapabilities,
   defaultModel: OMP_DEFAULT_MODEL,
   store: ompStore,
-  async listModels(cwd): Promise<OpenCodeProvidersResponse> {
-    return withOmpRpc(cwd, async (conn) => {
+  async listModels(cwd, auth?: BackendCredentialInput): Promise<OpenCodeProvidersResponse> {
+    const credential = await resolveBackendCredentials(auth, { cwd });
+    const readModels = async (conn: OmpRpcConnection): Promise<OpenCodeProvidersResponse> => {
       const rawModels = await conn.request("get_available_models");
       const models = normalizeModelsResponse(rawModels);
       const currentModel = await getCurrentModel(conn);
       return mapRpcModelsToOpenCodeProviders(models, currentModel?.providerID, currentModel?.modelID);
-    });
+    };
+    return credential
+      ? withOmpRpc(cwd, readModels, { credential })
+      : withOmpRpc(cwd, readModels);
   },
-  async createTurnConnection(cwd, sessionPath, openCodeId) {
-    const transport = await ompTransportFactory(cwd, sessionPath);
+  async createTurnConnection(cwd, sessionPath, openCodeId, auth?: BackendCredentialInput) {
+    const credential = await resolveBackendCredentials(auth, {
+      cwd,
+      openCodeId,
+    });
+    const transport = credential === undefined
+      ? await ompTransportFactory(cwd, sessionPath)
+      : await ompTransportFactory(cwd, sessionPath, credential);
     return createOmpTurnConnection(transport, { openCodeId, cwd, sessionPath });
   },
   shutdownAll() {

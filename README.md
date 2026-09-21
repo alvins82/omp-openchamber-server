@@ -34,6 +34,26 @@ Aliases `--omp-bin`, `--omp-binary`, and `-b` are also supported. Alternatively,
 OMP_BIN=/path/to/omp bun run src/main.ts
 ```
 
+#### Caller-owned provider credentials (optional)
+
+The sidecar normally lets OMP resolve providers from its own configuration.
+For a host application that owns provider credentials, a prompt may instead
+send exactly one of `credentials` or `credentialRef`. Raw credentials are
+scoped to that OMP child and removed with its temporary configuration. An
+opaque `credentialRef` is resolved through either a process-local resolver or
+an HTTP broker configured with:
+
+```bash
+OC_CREDENTIAL_RESOLVER_URL=http://127.0.0.1:8787/resolve \
+OC_CREDENTIAL_RESOLVER_TOKEN=... \
+  bun run src/main.ts
+```
+
+`POST /config/providers` accepts the same opt-in envelope for model discovery;
+`GET /config/providers` and requests without either field retain the existing
+OMP-owned provider behavior. See [`docs/providers.md`](./docs/providers.md) for
+the request shape and resolver contract.
+
 #### CLI Options
 
 - `-b, --binary <path>`: Path to custom OMP binary (aliases: `--omp-bin`, `--omp-binary`).
