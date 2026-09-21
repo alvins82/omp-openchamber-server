@@ -9,12 +9,9 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 
-export interface BrowserControlRequest {
-  requestId: string;
-  action: string;
-  parameters: Record<string, unknown>;
-  directory?: string;
-}
+import type { BrowserControlRequest } from "../../shared/contracts";
+
+export type { BrowserControlRequest } from "../../shared/contracts";
 
 export interface BrowserControlOutcome {
   ok: boolean;

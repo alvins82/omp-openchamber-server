@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { validateOmpBinary } from "./providers/omp/binary";
+import { validateOmpBinary } from "../../providers/omp/binary";
 
 export interface SidecarCliOptions {
   binary?: string;

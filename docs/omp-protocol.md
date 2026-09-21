@@ -41,6 +41,26 @@ Commands sent to OMP `stdin` take the shape `{"type": "<command>", "id": "<corre
 | `new_session` | `{"parentSession"?: string}` | Starts a new session or forks from a parent session. |
 | `abort` | `{}` | Requests immediate interruption of active turn generation. |
 
+The Jarvis adapter starts its OMP child with `--no-tools --no-extensions`.
+These are separate spawn options used only by `src/adapters/jarvis`; the
+existing OpenChamber adapter keeps OMP's normal native tools and extensions.
+
+### Host tools (Jarvis adapter)
+
+The RPC protocol supports a bidirectional host-tool bridge:
+
+| Frame | Direction | Purpose |
+|---|---|---|
+| `set_host_tools` | sidecar → OMP | Replaces the explicit tool definitions visible to the OMP session. |
+| `host_tool_call` | OMP → sidecar | Requests Jarvis to execute a capability; includes `id`, `toolCallId`, `toolName`, and `arguments`. |
+| `host_tool_update` | sidecar → OMP | Streams a partial `AgentToolResult` while a capability is running. |
+| `host_tool_result` | sidecar → OMP | Completes the request using the original provider request `id`. |
+| `host_tool_cancel` | OMP → sidecar | Notifies the host that a pending call was cancelled. |
+
+The sidecar does not execute a host tool. It records the pending provider
+request, publishes a Jarvis `tool_call_proposed` event, and waits for Jarvisbot
+to authorize and execute the capability.
+
 ---
 
 ## 3. Event Vocabulary

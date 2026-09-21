@@ -1,15 +1,6 @@
-export interface QuestionOption {
-  label: string;
-  description?: string;
-}
+import type { QuestionInfo, QuestionOption } from "../../shared/contracts";
 
-export interface QuestionInfo {
-  question: string;
-  header: string;
-  options: QuestionOption[];
-  multiple?: boolean;
-  custom?: boolean;
-}
+export type { QuestionInfo, QuestionOption } from "../../shared/contracts";
 
 export interface PermissionRequest {
   id: string;

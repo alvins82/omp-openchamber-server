@@ -8,12 +8,12 @@ import {
   listOmpSessions,
   toOpenCodeSessionId,
   encodeCwd,
-} from "./providers/omp/store";
-import { loadSessionMessages } from "./providers/omp/messages";
+} from "../../providers/omp/store";
+import { loadSessionMessages } from "../../providers/omp/messages";
 import { createEventHandler, setSubagentStatus, getSessionStatusMap } from "./prompt";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcEvent } from "./providers/omp/rpc";
-import { createOmpTurnConnection } from "./providers/omp/backend";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
+import type { OmpRpcEvent } from "../../providers/omp/rpc";
+import { createOmpTurnConnection } from "../../providers/omp/backend";
 
 /** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
 class FeedingTransport {
@@ -258,7 +258,7 @@ describe("Subagents & Child Sessions Integration", () => {
   });
 
   it("coalesces multi-step assistant turns with subagent tasks and aligns message IDs with streaming", async () => {
-    const { recordUserMessageId } = await import("./providers/omp/messages");
+    const { recordUserMessageId } = await import("../../providers/omp/messages");
     const parent = await createOmpSession(TEST_DIR, { title: "Subagent Test" });
     const userMessageId = "msg_client_subagent_prompt";
 

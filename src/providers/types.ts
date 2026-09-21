@@ -9,7 +9,7 @@
  *  - `prompt.ts` consumes backends only through `AgentBackend` /
  *    `BackendTurnConnection` / `SessionStore` / `NormalizedTurnEvent`.
  */
-import type { QuestionInfo } from "../approvals";
+import type { QuestionInfo } from "../shared/contracts";
 
 // ---------------------------------------------------------------------------
 // Model catalog protocol (OpenCode /provider surface)

@@ -1,4 +1,4 @@
-import { allBackends, backendById, backendForSession, nativeProviderID, splitProviderPrefix } from "./providers/registry";
+import { allBackends, backendById, backendForSession, nativeProviderID, splitProviderPrefix } from "../../providers/registry";
 import type {
   BackendSubagentSnapshot,
   BackendCredentialInput,
@@ -10,10 +10,10 @@ import type {
   ToolPartState,
   TokenBreakdown,
   TurnTelemetry,
-} from "./providers/types";
-import { CredentialInputError, credentialInputFingerprint } from "./providers/omp/credentials";
-import { promptLogger } from "./logger";
-import { isLowSignalTitleInput, normalizeGeneratedTitle } from "./title";
+} from "../../providers/types";
+import { CredentialInputError, credentialInputFingerprint } from "../../providers/omp/credentials";
+import { promptLogger } from "../../shared/logger";
+import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../../providers/omp/title";
 import {
   emitMessagePartDelta,
   emitMessagePartUpdated,
@@ -31,7 +31,7 @@ import {
   emitQuestionRejected,
   emitSessionCompactionStarted,
   emitSessionCompacted,
-} from "./sse";
+} from "../../shared/sse";
 import {
   addPendingPermission,
   addPendingQuestion,
@@ -39,8 +39,8 @@ import {
   type PermissionRequest,
   type QuestionRequest,
 } from "./approvals";
-import { normalizeToolInput, normalizeToolOutput } from "./tool-normalize";
-import { isBlobRef, readBlobBufferSync } from "./blobs";
+import { normalizeToolInput, normalizeToolOutput } from "../../shared/tool-normalize";
+import { isBlobRef, readBlobBufferSync } from "../../shared/blobs";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";

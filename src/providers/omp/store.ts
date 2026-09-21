@@ -8,15 +8,15 @@ import {
   overlayTitleSlotContent,
   parseTitleSlotLine,
   serializeTitleSlot,
-} from "../../title";
+} from "./title";
 import {
   deleteIndexedTitle,
   deletePersistedMessageIds,
   lookupIndexedTitle,
   recordIndexedTitle,
   searchMatchingSessionIds,
-} from "../../title-db";
-import { emitSessionUpdated } from "../../sse";
+} from "./title-db";
+import { emitSessionUpdated } from "../../shared/sse";
 import { mapOmpUsageToTokens } from "./messages";
 import type { OpenCodeSession, TokenBreakdown } from "../types";
 

@@ -1,14 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { withOmpRpc } from "./rpc";
 import { getOmpSessionByOpenCodeId } from "./store";
-import { sessionLogger } from "../../logger";
+import { sessionLogger } from "../../shared/logger";
 import {
   bindPersistedOmpMessageId,
   listPersistedMessageIds,
   recordPersistedMessageId,
-} from "../../title-db";
-import { normalizeToolInput, normalizeToolOutput } from "../../tool-normalize";
-import { resolveImageDataUrl, isBlobRef } from "../../blobs";
+} from "./title-db";
+import { normalizeToolInput, normalizeToolOutput } from "../../shared/tool-normalize";
+import { resolveImageDataUrl, isBlobRef } from "../../shared/blobs";
 import type {
   OpenCodeFilePart,
   OpenCodeMessageRecord,

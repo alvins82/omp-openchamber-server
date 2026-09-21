@@ -18,7 +18,7 @@ import {
   setOmpSessionTitle,
   readSessionHeader,
   fromOpenCodeSessionId,
-} from "./providers/omp/store";
+} from "./store";
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "oc-title-db-test-"));
 const TEST_DB = join(TEST_DIR, "history.db");
@@ -162,4 +162,3 @@ describe("title-db (OMP v18 history.db session_titles)", () => {
     expect(listPersistedMessageIds(sId, TEST_DB)).toHaveLength(0);
   });
 });
-

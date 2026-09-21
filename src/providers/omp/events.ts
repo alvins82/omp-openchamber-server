@@ -15,8 +15,8 @@ import { invalidateMessageCache, mapOmpUsageToTokens } from "./messages";
 import { readSessionHeader, readSessionIdSync, toOpenCodeSessionId } from "./store";
 import { extractTodosFromOmpDetails, isTodoTool } from "./todo";
 import type { OmpRpcEvent, OmpRpcTransport } from "./rpc";
-import { normalizeToolInput, normalizeToolOutput } from "../../tool-normalize";
-import { promptLogger } from "../../logger";
+import { normalizeToolInput, normalizeToolOutput } from "../../shared/tool-normalize";
+import { promptLogger } from "../../shared/logger";
 
 // ---------------------------------------------------------------------------
 // Raw-frame tool helpers (moved verbatim from prompt.ts)
