@@ -1,4 +1,4 @@
-import { logger } from "../../logger";
+import { logger } from "../../shared/logger";
 import { getOmpRuntimeInfo } from "./binary";
 
 const ompRepository = "can1357/oh-my-pi";

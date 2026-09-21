@@ -6,7 +6,7 @@ describe("logger formatting and level filtering", () => {
       "bun",
       "-e",
       `
-      import { logger, httpLogger, promptLogger } from "./src/logger";
+      import { logger, httpLogger, promptLogger } from "./src/shared/logger";
       logger.info("info_msg_emitted");
       logger.warn("warn_msg_emitted");
       httpLogger.info("http_info_emitted");
@@ -48,7 +48,7 @@ describe("logger formatting and level filtering", () => {
       "bun",
       "-e",
       `
-      import { logger, httpLogger } from "./src/logger";
+      import { logger, httpLogger } from "./src/shared/logger";
       logger.debug("debug_msg_allowed");
       httpLogger.debug("http_debug_allowed");
       `,

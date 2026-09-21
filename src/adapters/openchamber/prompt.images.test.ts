@@ -8,11 +8,11 @@ import {
   promptSessionAsync,
   removeSessionState,
 } from "./prompt";
-import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
-import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache } from "./providers/omp/messages";
-import type { OpenCodeFilePart, OpenCodeTextPart } from "./providers/types";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcTransport, OmpRpcEvent } from "./providers/omp/rpc";
+import { setOmpTransportFactory, resetOmpTransportFactory } from "../../providers/omp/backend";
+import { loadMessagesFromFile, clearRecordedUserMessagesMemoryCache } from "../../providers/omp/messages";
+import type { OpenCodeFilePart, OpenCodeTextPart } from "../../providers/types";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
+import type { OmpRpcTransport, OmpRpcEvent } from "../../providers/omp/rpc";
 
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";

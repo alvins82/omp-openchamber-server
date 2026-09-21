@@ -6,7 +6,7 @@ import { resolveOmpBinary } from "./binary";
 import { createOmpCredentialRuntime, type OmpCredentialRuntime } from "./credential-runtime";
 
 export function getSidecarExtensionPaths(): string[] {
-  const extensionsDir = join(import.meta.dir, "..", "..", "..", "extensions");
+  const extensionsDir = join(import.meta.dir, "..", "..", "adapters", "openchamber", "extensions");
   if (!existsSync(extensionsDir)) return [];
   return readdirSync(extensionsDir)
     .filter((f) => f.endsWith(".ts"))
@@ -88,6 +88,10 @@ export interface OmpRpcTransport {
 export interface OmpRpcSpawnOptions {
   /** Optional caller-owned credentials for this OMP child only. */
   credential?: BackendCredentials;
+  /** Start OMP with no native tools; host tools can still be registered over RPC. */
+  noTools?: boolean;
+  /** Do not load sidecar/project extensions into this embedded OMP child. */
+  disableExtensions?: boolean;
 }
 
 export interface OmpRpcModel {
@@ -213,11 +217,15 @@ export class OmpRpcConnection {
       }
       // detached: the child leads its own process group so kill() can take
       // down MCP/LSP grandchildren instead of orphaning them.
-      const extPaths = getSidecarExtensionPaths();
+      const extPaths = options.disableExtensions ? [] : getSidecarExtensionPaths();
       const extArgs = extPaths.flatMap((p) => ["--extension", p]);
+      const toolArgs = [
+        ...(options.noTools ? ["--no-tools"] : []),
+        ...(options.disableExtensions ? ["--no-extensions"] : []),
+      ];
       try {
         const proc = Bun.spawn(
-          [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...extArgs],
+          [omp, "--mode", "rpc", "--cwd", cwd, "--no-title", "--no-pty", "--config", embeddedOmpConfigOverlay(), ...toolArgs, ...extArgs],
           {
             stdin: "pipe",
             stdout: "pipe",

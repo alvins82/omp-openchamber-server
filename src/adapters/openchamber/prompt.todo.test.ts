@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
 import { createEventHandler } from "./prompt";
-import { isTodoTool, normalizeOmpTodoStatus, extractTodosFromOmpDetails } from "./providers/omp/todo";
-import type { OmpRpcEvent } from "./providers/omp/rpc";
-import { createOmpTurnConnection } from "./providers/omp/backend";
+import { isTodoTool, normalizeOmpTodoStatus, extractTodosFromOmpDetails } from "../../providers/omp/todo";
+import type { OmpRpcEvent } from "../../providers/omp/rpc";
+import { createOmpTurnConnection } from "../../providers/omp/backend";
 
 /** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
 class FeedingTransport {

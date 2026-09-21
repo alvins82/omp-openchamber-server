@@ -12,19 +12,19 @@ import {
   emitSessionError,
   subscribeOpenCodeEvents,
   type OpenCodeEvent,
-} from "./sse";
+} from "../../shared/sse";
 import {
   createOmpSession,
   getOmpSessionByOpenCodeId,
   deleteOmpSession,
   updateOmpSession,
   listOmpSessions,
-} from "./providers/omp/store";
-import { mapRpcMessagesToOpenCodeRecords, type AgentMessage } from "./providers/omp/messages";
-import type { OpenCodeToolPart } from "./providers/types";
+} from "../../providers/omp/store";
+import { mapRpcMessagesToOpenCodeRecords, type AgentMessage } from "../../providers/omp/messages";
+import type { OpenCodeToolPart } from "../../providers/types";
 import { createEventHandler } from "./prompt";
-import type { OmpRpcEvent } from "./providers/omp/rpc";
-import { createOmpTurnConnection } from "./providers/omp/backend";
+import type { OmpRpcEvent } from "../../providers/omp/rpc";
+import { createOmpTurnConnection } from "../../providers/omp/backend";
 
 /** Minimal OmpRpcTransport that lets tests feed raw events through the omp normalizer. */
 class FeedingTransport {

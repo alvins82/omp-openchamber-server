@@ -2,6 +2,16 @@
 
 Use [OpenChamber](https://github.com/OpenChamber/OpenChamber) as a UI for [oh-my-pi](https://github.com/can1357/oh-my-pi) coding sessions — without modifying either project.
 
+## Source layout
+
+- `src/main.ts` — stable process entrypoint.
+- `src/server.ts` — Bun HTTP/WebSocket composition and adapter mounting.
+- `src/adapters/openchamber/` — OpenCode/OpenChamber compatibility behavior,
+  tests, and extensions.
+- `src/adapters/jarvis/` — Jarvis session/turn and host-tool adapter.
+- `src/providers/omp/` — OMP RPC, session persistence, and model provider.
+- `src/shared/` — shared protocol types, event transport, logging, and utilities.
+
 ## Quick Start
 
 ### 1. Prerequisites

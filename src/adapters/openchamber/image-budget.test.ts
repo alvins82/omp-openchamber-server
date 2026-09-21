@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import imageBudgetExtension, {
   pruneContextImages,
   pruneProviderPayloadImages,
-} from "../extensions/image_budget";
-import { getSidecarExtensionPaths, embeddedOmpConfigOverlay } from "./providers/omp/rpc";
+} from "./extensions/image_budget";
+import { getSidecarExtensionPaths, embeddedOmpConfigOverlay } from "../../providers/omp/rpc";
 import { existsSync, readFileSync } from "node:fs";
 
 const PNG_1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";

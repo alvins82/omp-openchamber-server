@@ -7,11 +7,11 @@ import {
   reconcileSessionStatuses,
   shutdownAll,
 } from "./prompt";
-import { setOmpTransportFactory, resetOmpTransportFactory } from "./providers/omp/backend";
-import { resetCredentialResolver, setCredentialResolver } from "./providers/omp/credentials";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcEvent, OmpRpcTransport } from "./providers/omp/rpc";
-import type { BackendCredentials, BackendSubagentStatus } from "./providers/types";
+import { setOmpTransportFactory, resetOmpTransportFactory } from "../../providers/omp/backend";
+import { resetCredentialResolver, setCredentialResolver } from "../../providers/omp/credentials";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
+import type { OmpRpcEvent, OmpRpcTransport } from "../../providers/omp/rpc";
+import type { BackendCredentials, BackendSubagentStatus } from "../../providers/types";
 
 /**
  * Fake OMP transport for orchestration tests. Records every RPC and lets the

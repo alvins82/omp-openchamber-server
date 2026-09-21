@@ -61,7 +61,7 @@ their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 
 - `registerBackend(backend)` — idempotent on `id`. omp registers at startup;
   the fake backend registers only when `OC_FAKE_BACKEND=1` (env gate in
-  `src/main.ts`).
+  `src/server.ts`).
 - Registration order matters: `defaultBackend()` is `backends[0]` (omp).
 - `resetBackends()` restores the default catalog; test-only.
 - `listProviders` / `listSessionsAcrossBackends` merge catalogs and session
@@ -88,7 +88,7 @@ their native streams into `NormalizedTurnEvent` (`src/providers/types.ts`):
 - A session is bound to its backend for its lifetime: prompting with a
   namespaced model that belongs to a different backend returns
   `400 — model provider does not belong to this session's backend`
-  (checked in `src/prompt.ts` before the session lock is taken).
+  (checked in `src/adapters/openchamber/prompt.ts` before the session lock is taken).
 
 ## Capability Gating
 
@@ -179,3 +179,42 @@ secrets at all.
   `src/providers/fake/backend.http.test.ts` (spawns the real sidecar on port
   4399 and drives catalog, routing, gates, SSE turn, and the D1 mismatch rule
   over HTTP).
+
+## Jarvis adapter (`src/adapters/jarvis/*`)
+
+The Jarvis integration is intentionally not another OpenCode backend. It is a
+separate internal adapter mounted by `src/server.ts` at
+`/internal/jarvis/v1/*`. The adapter reuses `providers/omp/rpc.ts` and the OMP
+session store, but does not change the public OpenChamber/OpenCode routes.
+
+### Session and turn ownership
+
+Jarvisbot owns the durable `sessionId`, `turnId`, `attemptId`, lease fences,
+run authorization, and capability execution. The sidecar owns only:
+
+| Sidecar value | Purpose |
+| --- | --- |
+| `provider.openCodeId` | OMP's deterministic external session id. |
+| `provider.sessionPath` | OMP's append-only JSONL transcript path. |
+| `sequence` | Monotonic cursor for adapter events. |
+| `providerRequestId` | OMP host-tool request id required to submit a result. |
+
+The provider mapping is returned from session creation and is also persisted
+in the sidecar state file, so a worker can reconnect or reconcile after a
+sidecar restart. A session with an abandoned active turn is marked
+`recovery_required` until `/reconcile` observes that OMP is idle.
+
+### Host-tool boundary
+
+Every Jarvis `tools` or `boundCapabilities` definition is converted to an OMP
+`set_host_tools` definition. Jarvis capability fields such as
+`requiresApproval` and `category` remain sidecar metadata; OMP never uses them
+to authorize execution. OMP is started with `--no-tools --no-extensions`, so only these
+explicitly registered host tools are callable. On `host_tool_call`, the
+adapter emits `tool_call_proposed`; Jarvis executes the capability and posts a
+`host_tool_result` or `host_tool_update` back through the action route.
+
+The adapter never forwards OMP thinking deltas as public Jarvis events. Text
+deltas, host-tool lifecycle, cancellation, terminal completion, and provider
+failure are represented as replayable events with the caller's turn/attempt
+ids.

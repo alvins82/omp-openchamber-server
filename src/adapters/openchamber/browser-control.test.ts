@@ -9,7 +9,7 @@ import {
   emitBrowserControlRequest,
   createOpenCodeEventStream,
   formatOpenCodeEvent,
-} from "./sse";
+} from "../../shared/sse";
 
 describe("BrowserControlBroker", () => {
   it("creates a request and broadcasts to listeners", async () => {

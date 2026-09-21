@@ -13,7 +13,7 @@ import {
   deleteOmpSession,
   updateOmpSession,
 } from "./store";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../sse";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
 
 const UUID_A = "123e4567-e89b-12d3-a456-426614174000";
 const UUID_B = "00000000-1111-2222-3333-444455556666";

@@ -2,9 +2,9 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { backendForSession } from "./providers/registry";
+import { backendForSession } from "../../providers/registry";
 import { promptSessionAsync, getSessionStatusMap } from "./prompt";
-import { emitOpenCodeEvent, subscribeOpenCodeEvents } from "./sse";
+import { emitOpenCodeEvent, subscribeOpenCodeEvents } from "../../shared/sse";
 
 const MAX_SESSIONS = 50;
 const MAX_ITEMS_PER_SESSION = 20;

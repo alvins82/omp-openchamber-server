@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BrowserControlRequest } from "./browser-control";
+import type { BrowserControlRequest } from "./contracts";
 
 export interface OpenCodeEvent {
   type: string;

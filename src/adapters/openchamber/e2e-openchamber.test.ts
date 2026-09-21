@@ -100,6 +100,44 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     }
   });
 
+  test("Jarvis adapter mounts beside OpenChamber and drives a host-isolated OMP turn", async () => {
+    const sessionId = `asess_e2e_${Date.now()}`;
+    const jarvisBase = BASE + "internal/jarvis/v1";
+    const create = await fetch(`${jarvisBase}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        workspaceId: "ws_e2e",
+        cwd: testDir,
+        tools: [{
+          name: "read_file",
+          description: "Read a file",
+          parameters: { type: "object", properties: { path: { type: "string" } } },
+        }],
+      }),
+    });
+    expect(create.status).toBe(201);
+
+    const start = await fetch(`${jarvisBase}/sessions/${sessionId}/turns`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ turnId: "turn_e2e", attemptId: "att_e2e", prompt: "Say hello" }),
+    });
+    expect(start.status).toBe(202);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const eventsResponse = await fetch(`${jarvisBase}/sessions/${sessionId}/events?stream=0&after=0`);
+    expect(eventsResponse.status).toBe(200);
+    const eventBody = await eventsResponse.json() as { events: Array<{ type: string; data?: Record<string, unknown> }> };
+    expect(eventBody.events.map((event) => event.type)).toContain("text_delta");
+    expect(eventBody.events.map((event) => event.type)).toContain("turn_completed");
+    expect(eventBody.events.find((event) => event.type === "turn_completed")?.data?.outputText).toBe("Hello");
+
+    const deleted = await fetch(`${jarvisBase}/sessions/${sessionId}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+  });
+
   test("Project response satisfies OpenChamber resolveConfigDirectory", async () => {
     const res = await fetch(BASE + `project/current?directory=${encodeURIComponent(testDir)}`);
     expect(res.status).toBe(200);
@@ -353,5 +391,4 @@ describe("OpenChamber End-to-End Compatibility & Model Picker Verification", () 
     }
   });
 });
-
 

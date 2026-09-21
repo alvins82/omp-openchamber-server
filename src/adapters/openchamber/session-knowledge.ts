@@ -1,4 +1,4 @@
-import type { OpenCodeSession } from "./providers/types";
+import type { OpenCodeSession } from "../../providers/types";
 import type { ProjectContextRuntime, ProjectNote, ProjectPlanLink, RouteResult } from "./project-context";
 
 const KNOWLEDGE_METADATA_KEY = "knowledge_context_delivered";

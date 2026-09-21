@@ -138,7 +138,7 @@ interface MessageRecord {
      "tool": "read",
      "state": {
        "status": "completed",
-       "input": { "path": "src/main.ts" },
+     "input": { "path": "src/server.ts" },
        "output": "file content...",
        "time": { "start": 1756000000000, "end": 1756000001000 }
      }

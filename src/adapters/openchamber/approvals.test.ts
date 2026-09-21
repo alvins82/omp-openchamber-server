@@ -15,9 +15,9 @@ import {
   type QuestionRequest,
 } from "./approvals";
 import { createEventHandler } from "./prompt";
-import { subscribeOpenCodeEvents, type OpenCodeEvent } from "./sse";
-import type { OmpRpcEvent } from "./providers/omp/rpc";
-import { createOmpTurnConnection } from "./providers/omp/backend";
+import { subscribeOpenCodeEvents, type OpenCodeEvent } from "../../shared/sse";
+import type { OmpRpcEvent } from "../../providers/omp/rpc";
+import { createOmpTurnConnection } from "../../providers/omp/backend";
 
 /** Minimal OmpRpcTransport that captures outgoing frames and lets tests feed raw events. */
 class CapturingTransport {
@@ -334,7 +334,7 @@ describe("Approval & Question Bridge (Tier 1)", () => {
 
   describe("bundled question extension", () => {
     it("registers the question tool with TypeBox schema and executes ctx.ui.select", async () => {
-      const questionExtension = require("../extensions/question").default;
+      const questionExtension = require("./extensions/question").default;
       let registeredTool: any = null;
 
       const mockPi = {
