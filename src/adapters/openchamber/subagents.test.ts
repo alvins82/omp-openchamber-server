@@ -73,6 +73,7 @@ describe("Subagents & Child Sessions Integration", () => {
       cwd: TEST_DIR,
       title: "Research Worker",
       agent: "task",
+      parentSession: parent.path,
     };
     const childMsg = {
       type: "message",
@@ -186,6 +187,25 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(events.some((event) => event.type === "session.status" && event.properties.sessionID === "ses_subworker1" && (event.properties.status as { type?: string }).type === "idle")).toBe(true);
 
     unsub();
+  });
+
+  it("returns an empty transcript for a readable header-only session without RPC", async () => {
+    const staleCwd = join("/tmp", `omp-deleted-worktree-${Math.random().toString(36).slice(2)}`);
+    const sessionUuid = "937146a6-fb8c-4501-bac5-f912c90ca2a0";
+    const sessionDir = join(Bun.env.HOME!, ".omp", "agent", "sessions", encodeCwd(staleCwd));
+    const sessionPath = join(sessionDir, "2026-09-22T08-54-47-174Z_" + sessionUuid + ".jsonl");
+    await mkdir(sessionDir, { recursive: true });
+    await Bun.write(
+      sessionPath,
+      `${JSON.stringify({ type: "title", v: 1, title: "", updatedAt: new Date().toISOString(), pad: " ".repeat(180) })}\n` +
+      `${JSON.stringify({ type: "session", id: sessionUuid, timestamp: new Date().toISOString(), cwd: staleCwd, provider: "omp", modelId: "omp", version: 3 })}\n`,
+    );
+
+    try {
+      await expect(loadSessionMessages(toOpenCodeSessionId(sessionUuid), staleCwd)).resolves.toEqual([]);
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+    }
   });
 
   it("uses the persisted child UUID when OMP identifies a subagent by name", async () => {

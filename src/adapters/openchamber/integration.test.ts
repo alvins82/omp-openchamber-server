@@ -1,6 +1,6 @@
 import { expect, test, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const ROOT = process.cwd();
@@ -13,8 +13,6 @@ const UUID_A = "123e4567-e89b-12d3-a456-426614174000";
 const UUID_B = "00000000-1111-2222-3333-444455556666";
 const SES_A = "ses_" + UUID_A.replace(/-/g, "");
 const SES_B = "ses_" + UUID_B.replace(/-/g, "");
-const DIR_A = "/Users/alvin/proj";
-const DIR_B = "/elsewhere";
 
 type MsgInfo = { role?: string; finish?: string; id?: string; sessionID?: string };
 
@@ -27,8 +25,10 @@ function defined<T>(value: T | undefined): T {
 type SSEEvent = { type: string; properties: Record<string, unknown> };
 
 const FAKE_HOME = mkdtempSync(join(tmpdir(), "oc-integ-"));
+const DIR_A = join(FAKE_HOME, "proj");
+const DIR_B = join(FAKE_HOME, "elsewhere");
 const SPAWN_LOG = join(FAKE_HOME, "spawn.log");
-const FILE_A = join(FAKE_HOME, ".omp", "agent", "sessions", "-Users-alvin-proj", "a.jsonl");
+const FILE_A = join(FAKE_HOME, ".omp", "agent", "sessions", "-proj", "a.jsonl");
 const FILE_B = join(FAKE_HOME, ".omp", "agent", "sessions", "-elsewhere", "b.jsonl");
 
 function spawnLogLines(): number {
@@ -118,7 +118,9 @@ async function postPrompt(text: string) {
 }
 
 beforeAll(async () => {
-  mkdirSync(join(FAKE_HOME, ".omp", "agent", "sessions", "-Users-alvin-proj"), { recursive: true });
+  mkdirSync(DIR_A, { recursive: true });
+  mkdirSync(DIR_B, { recursive: true });
+  mkdirSync(join(FAKE_HOME, ".omp", "agent", "sessions", "-proj"), { recursive: true });
   mkdirSync(join(FAKE_HOME, ".omp", "agent", "sessions", "-elsewhere"), { recursive: true });
   writeFileSync(FILE_A, sessionLine(UUID_A, DIR_A));
   writeFileSync(FILE_B, sessionLine(UUID_B, DIR_B));
@@ -323,6 +325,46 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     const miss = await fetch(BASE + "session/" + "ses_" + "f".repeat(32));
     expect(miss.status).toBe(404);
     expect((await miss.json()).error).toBe("session not found");
+  });
+
+  test("GET /session/:id/children discovers disk children with canonical parent ids after reload", async () => {
+    const childUuid = "01a0c830-928a-779d-b14b-48aa3aac938b";
+    const artifactDir = join(dirname(FILE_A), `2026-09-22T05-34-02-415Z_${UUID_A}`);
+    const childFile = join(artifactDir, "DocsSpecSync.jsonl");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(
+      childFile,
+      JSON.stringify({
+        type: "session",
+        id: childUuid,
+        timestamp: "2026-09-22T08:17:01.578Z",
+        cwd: DIR_A,
+        title: "DocsSpecSync",
+        parentSession: FILE_A,
+        version: 3,
+      }) + "\n",
+    );
+
+    try {
+      const path = `session/${SES_A}/children?directory=${encodeURIComponent(DIR_A)}`;
+      const first = await fetch(BASE + path);
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual([
+        expect.objectContaining({
+          id: "ses_01a0c830928a779db14b48aa3aac938b",
+          parentID: SES_A,
+          title: "DocsSpecSync",
+        }),
+      ]);
+
+      // The route re-reads the session files; a second request verifies the
+      // relationship survives a disk-backed refresh/reconnect.
+      const second = await fetch(BASE + path);
+      expect(second.status).toBe(200);
+      expect((await second.json())[0].parentID).toBe(SES_A);
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
   });
 
   test("POST /session creates a persistent session (201) discoverable immediately", async () => {
@@ -882,17 +924,24 @@ await new Promise((r) => setTimeout(r, 60));
     expect(await (await fetch(BASE + "session/status")).json()).toEqual({});
   });
 
-  test("GET /session/:id/message falls back to rpc get_messages when the file cannot answer", async () => {
+  test("GET /session/:id/message returns an empty array for a readable header-only file without spawning OMP", async () => {
+    const create = await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Header-only message test" }),
+    });
+    expect(create.status).toBe(201);
+    const emptySession = (await create.json()) as { id: string };
     const before = spawnLogLines();
-    const r = await fetch(BASE + "session/" + SES_A + "/message");
+    const r = await fetch(BASE + "session/" + emptySession.id + "/message");
     expect(r.status).toBe(200);
     const msgs = await r.json();
-    expect(msgs).toHaveLength(2);
-    const ids = msgs.map((m: { info: { id: string } }) => m.info.id);
-    // OMP passes message ids through the host session: msg_<sessionID>_<providerID>.
-    expect(ids).toContain("msg_" + SES_A + "_mock_m1");
-    expect(ids).toContain("msg_" + SES_A + "_mock_m2");
-    expect(spawnLogLines()).toBe(before + 1);
+    expect(msgs).toEqual([]);
+    expect(spawnLogLines()).toBe(before);
+
+    const missing = await fetch(BASE + "session/ses_" + "f".repeat(32) + "/message");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "session not found" });
   });
 
   test("browser control routes: claim, result, and internal request coordinate over SSE", async () => {

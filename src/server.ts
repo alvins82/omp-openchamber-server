@@ -36,7 +36,7 @@ import {
 } from "./adapters/openchamber/prompt";
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
 import { invalidateMessageCache } from "./providers/omp/messages";
-import { getSidecarExtensionPaths, withOmpRpc } from "./providers/omp/rpc";
+import { getSidecarExtensionPaths, MissingWorkingDirectoryError, withOmpRpc } from "./providers/omp/rpc";
 import { ensureOmpBinary, getOmpRuntimeInfo, probeOmpVersion, setExplicitOmpBinary } from "./providers/omp/binary";
 import { startOmpUpdateChecker } from "./providers/omp/update-check";
 import { parseCliArgs, printHelp, type SidecarCliOptions } from "./adapters/openchamber/cli";
@@ -1561,6 +1561,9 @@ const MIME_TYPES: Record<string, string> = {
         if (messages == null) return jsonError("load failed", 500);
         return json(messages);
       } catch (err) {
+        if (err instanceof MissingWorkingDirectoryError) {
+          return json({ error: err.message, reason: err.reason, cwd: err.cwd }, { status: err.statusCode });
+        }
         return jsonError(err instanceof Error ? err.message : "load failed", 500);
       }
     }
