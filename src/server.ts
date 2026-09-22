@@ -48,7 +48,7 @@ import type { BackendCredentialInput, OpenCodeProvidersResponse } from "./provid
 import { CredentialInputError } from "./providers/omp/credentials";
 import { logger, httpLogger } from "./shared/logger";
 import { join, isAbsolute, basename, extname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { readdir, mkdir, stat, unlink, rename } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -475,6 +475,18 @@ const server = Bun.serve<SidecarWebSocketData>({
           healthy: true,
           status: "ok",
           compatibility: COMPATIBILITY,
+        });
+      }
+
+      // OpenCode 2.0.8+ uses /api/info as its readiness probe. Keep the
+      // response shape compatible while identifying the OMP runtime behind
+      // this sidecar.
+      if (path === "/api/info" && req.method === "GET") {
+        return json({
+          version: getOmpRuntimeInfo().version ?? "unknown",
+          pid: process.pid,
+          urls: [url.origin],
+          paths: { tmp: tmpdir() },
         });
       }
 

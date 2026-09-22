@@ -21,6 +21,21 @@ Returns proxy health status.
 }
 ```
 
+### `GET /api/info`
+Returns OpenCode-compatible server identity information for clients that use
+this endpoint as their readiness probe. `version` is the detected OMP runtime
+version, or `"unknown"` when it is unavailable.
+
+**Response `200 OK`**:
+```json
+{
+  "version": "18.2.8",
+  "pid": 12345,
+  "urls": ["http://127.0.0.1:4096"],
+  "paths": { "tmp": "/tmp" }
+}
+```
+
 ### `GET /path`
 Returns resolved path information for the given directory.
 
