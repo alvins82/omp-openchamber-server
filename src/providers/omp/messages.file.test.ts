@@ -63,7 +63,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
     expect(await loadMessagesFromFile(join(TMP, "blank.jsonl"), SID, TEST_DB)).toBeNull();
   });
 
-  it("returns null when the file holds only non-message entries", async () => {
+  it("returns an empty transcript when a readable session holds only non-message entries", async () => {
     const path = fileFor("meta-only.jsonl", [
       { type: "session", id: SID, title: "t" },
       { type: "title", title: "t" },
@@ -71,7 +71,7 @@ describe("loadMessagesFromFile — Tier A1 session-file fast path", () => {
       { type: "thinking_level_change", level: "default" },
       { type: "session_exit", status: 143, timestamp: "2026-08-23T00:00:00.000Z" },
     ]);
-    expect(await loadMessagesFromFile(path, SID, TEST_DB)).toBeNull();
+    expect(await loadMessagesFromFile(path, SID, TEST_DB)).toEqual([]);
   });
   it("maps user and assistant messages in file order", async () => {
     const path = fileFor("basic.jsonl", [

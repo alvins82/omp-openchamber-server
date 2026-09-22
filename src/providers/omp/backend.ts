@@ -216,7 +216,7 @@ const ompStore: SessionStore = {
     return listOmpChildSessions(parentOpenCodeId, directory);
   },
   async transcript(openCodeId, cwd) {
-    return loadSessionMessages(openCodeId, cwd).catch(() => null);
+    return loadSessionMessages(openCodeId, cwd);
   },
   beforeTurn(openCodeId, cwd) {
     invalidateMessageCache(openCodeId, cwd);

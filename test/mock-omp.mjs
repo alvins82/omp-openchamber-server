@@ -84,6 +84,17 @@ function textDelta(messageId, text) {
   });
 }
 
+function appendPersistedTurn(message) {
+  if (!currentSessionPath) return;
+  const userId = "mock_m1";
+  const assistantId = "mock_m2";
+  appendFileSync(
+    currentSessionPath,
+    `${JSON.stringify({ type: "message", id: userId, timestamp: new Date(1755930000000).toISOString(), message: { id: userId, role: "user", content: message, timestamp: 1755930000000 } })}\n` +
+    `${JSON.stringify({ type: "message", id: assistantId, timestamp: new Date(1755930005000).toISOString(), message: { id: assistantId, role: "assistant", content: [{ type: "text", text: "from-rpc" }], provider: "sidevllm", model: "qwen", stopReason: "stop", timestamp: 1755930005000 } })}\n`,
+  );
+}
+
 function runNormalTurn(id, message) {
   const messageId = "mock_msg_" + Date.now();
   writeLine({ type: "agent_start", session: "mock" });
@@ -92,6 +103,7 @@ function runNormalTurn(id, message) {
   writeLine({ type: "tool_execution_start", payload: { toolCallId: "mock_call_1", name: "bash", arguments: { command: "ls" } } });
   writeLine({ type: "tool_execution_update", payload: { toolCallId: "mock_call_1", output: "a.txt" } });
   writeLine({ type: "tool_execution_end", payload: { toolCallId: "mock_call_1", output: "a.txt" } });
+  appendPersistedTurn(message);
   respond(id, {});
   writeLine({ type: "agent_end", session: "mock" });
   inTurn = false;

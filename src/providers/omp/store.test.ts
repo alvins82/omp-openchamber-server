@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   toOpenCodeSessionId,
   fromOpenCodeSessionId,
+  normalizeParentSessionId,
   encodeCwd,
   readSessionHeader,
   listOmpSessions,
@@ -79,6 +80,15 @@ describe("session id mapping (Tier A3, pure)", () => {
   it("round-trips ids in both directions", () => {
     expect(fromOpenCodeSessionId(toOpenCodeSessionId(UUID_A))).toBe(UUID_A);
     expect(toOpenCodeSessionId(fromOpenCodeSessionId("ses_" + HEXA))).toBe("ses_" + HEXA);
+  });
+
+  it("normalizes parent transcript paths and prefers the artifact parent UUID", () => {
+    const parentPath = "/Users/alvin/.omp/agent/sessions/-jarvis/2026-09-22T05-34-02-415Z_8ba13d8c-3322-46e4-bc74-b5504839483a.jsonl";
+    expect(normalizeParentSessionId(parentPath)).toBe("ses_8ba13d8c332246e4bc74b5504839483a");
+    expect(normalizeParentSessionId("ses_8ba13d8c332246e4bc74b5504839483a")).toBe("ses_8ba13d8c332246e4bc74b5504839483a");
+    expect(normalizeParentSessionId(UUID_A)).toBe("ses_" + HEXA);
+    expect(normalizeParentSessionId(parentPath, UUID_B)).toBe("ses_" + HEXB);
+    expect(normalizeParentSessionId("/tmp/not-a-session.jsonl")).toBeUndefined();
   });
 
   it("encodeCwd encodes slashes to dashes and home-relative paths to root-relative", () => {
@@ -355,7 +365,6 @@ describe("create, update, and delete OMP sessions", () => {
     }
   });
 });
-
 
 
 
