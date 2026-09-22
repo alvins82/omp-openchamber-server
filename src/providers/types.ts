@@ -144,6 +144,8 @@ export interface ImageContent {
 export interface TurnPromptInput {
   message: string;
   images?: ImageContent[];
+  /** Select the queueing behavior when the backend is already streaming. */
+  streamingBehavior?: "steer" | "followUp";
 }
 
 // ---------------------------------------------------------------------------

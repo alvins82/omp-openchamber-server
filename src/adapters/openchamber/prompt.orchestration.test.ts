@@ -76,6 +76,10 @@ class FakeTransport implements OmpRpcTransport {
     return this.#prompts.at(-1);
   }
 
+  promptSettlers(): Array<{ resolve: (v?: unknown) => void; reject: (e: Error) => void }> {
+    return [...this.#prompts];
+  }
+
   requestCount(method: string): number {
     return this.requests.filter((r) => r.method === method).length;
   }
@@ -246,6 +250,12 @@ describe("promptSessionAsync orchestration", () => {
     const c = await promptSessionAsync("z", "/c", "/s", { messageID: 42, parts: [{ type: "text", text: "hi" }] });
     expect(c.status).toBe(400);
 
+    const d = await promptSessionAsync("w", "/c", "/s", {
+      delivery: "queue",
+      parts: [{ type: "text", text: "unsupported delivery" }],
+    });
+    expect(d.status).toBe(400);
+
     expect(created.length).toBe(before);
   });
 
@@ -363,6 +373,48 @@ describe("promptSessionAsync orchestration", () => {
 
     await completePrompt(t, openCodeId, cwd);
     expect(isSessionBusy(openCodeId, cwd)).toBe(false);
+  });
+
+  test("steers an active session through OMP without replacing its turn lifecycle", async () => {
+    installFakeFactory();
+    const { openCodeId, cwd, sessionPath } = newSession();
+    const { events, stop } = captureEvents();
+
+    const first = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+      messageID: "msg_first",
+      parts: [{ type: "text", text: "one" }],
+    });
+    expect(first).toEqual({ queued: true });
+
+    const t = lastTransport();
+    await waitFor(() => t.requestCount("prompt") === 1);
+
+    const steer = await promptSessionAsync(openCodeId, cwd, sessionPath, {
+      messageID: "msg_steer",
+      delivery: "steer",
+      parts: [{ type: "text", text: "two" }],
+    });
+    expect(steer).toEqual({ queued: true });
+    expect(isSessionBusy(openCodeId, cwd)).toBe(true);
+
+    const promptRequests = t.requests.filter((request) => request.method === "prompt");
+    expect(promptRequests).toHaveLength(2);
+    expect(promptRequests[0].params).toEqual({ message: "one" });
+    expect(promptRequests[1].params).toEqual({ message: "two", streamingBehavior: "steer" });
+
+    const userMessages = events
+      .filter((event) => event.type === "message.updated")
+      .map(info)
+      .filter((message) => message.role === "user");
+    expect(userMessages).toHaveLength(2);
+
+    t.fire({ type: "agent_end" });
+    for (const prompt of t.promptSettlers()) prompt.resolve();
+    await waitFor(() => !isSessionBusy(openCodeId, cwd), 1000);
+
+    expect(events.filter((event) => event.type === "session.status")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "session.idle")).toHaveLength(1);
+    stop();
   });
 
   test("reconciles active subagents from the backend snapshot", async () => {
