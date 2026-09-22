@@ -789,6 +789,20 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(await (await fetch(BASE + "session/status")).json()).toEqual({});
     expect(spawnLogLines()).toBe(before);
   });
+
+  test("OpenChamber compatibility snapshots answer guest and global status probes", async () => {
+    const guests = await fetch(BASE + "api/guests");
+    expect(guests.status).toBe(200);
+    expect(await guests.json()).toEqual({ guests: [] });
+
+    const status = await fetch(BASE + "api/sessions/status");
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({
+      sessions: {},
+      pending: {},
+      serverTime: expect.any(Number),
+    });
+  });
 });
 
 function eventsFor(events: SSEEvent[], type: string, ses: string) {
@@ -906,6 +920,14 @@ await new Promise((r) => setTimeout(r, 60));
 
     const busyMap = await (await fetch(BASE + "session/status")).json();
     expect(busyMap[SES_A]).toEqual({ type: "busy" });
+
+    const hostStatus = await (await fetch(BASE + "api/sessions/status")).json();
+    expect(hostStatus.sessions[SES_A]).toMatchObject({
+      status: "busy",
+      lastUpdateAt: expect.any(Number),
+    });
+    expect(hostStatus.pending).toEqual({});
+    expect(hostStatus.serverTime).toEqual(expect.any(Number));
 
     await stream;
     expect(await (await fetch(BASE + "session/status")).json()).toEqual({});
