@@ -126,6 +126,37 @@ treat Linear as disconnected instead of logging a missing route.
 Linear authorization, issue, mapping, and session-status routes are not
 implemented by the sidecar.
 
+## OpenChamber compatibility snapshots
+
+### `GET /api/guests`
+
+Returns the OpenChamber guest-extension catalog. The sidecar does not manage
+OpenChamber guest packages, so it returns an explicit empty catalog:
+
+```json
+{ "guests": [] }
+```
+
+### `GET /api/sessions/status`
+
+Returns the cross-project status snapshot used by OpenChamber's global status
+seed. Unlike `GET /session/status`, which returns the native OpenCode status
+map, this route wraps each active status with a server timestamp and includes
+pending permissions/questions:
+
+```json
+{
+  "sessions": {
+    "ses_123": {
+      "status": "busy",
+      "lastUpdateAt": 1756001000000
+    }
+  },
+  "pending": {},
+  "serverTime": 1756001000000
+}
+```
+
 ## Git
 
 Git routes use the local `git` executable and accept the repository directory

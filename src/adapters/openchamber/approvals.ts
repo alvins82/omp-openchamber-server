@@ -31,6 +31,11 @@ interface PendingQuestionEntry {
   resolve: (response: { value?: string; cancelled?: boolean }) => void;
 }
 
+export interface PendingBlockingRequestsSnapshotEntry {
+  permissions: PermissionRequest[];
+  questions: QuestionRequest[];
+}
+
 const pendingPermissions = new Map<string, PendingPermissionEntry>();
 const pendingQuestions = new Map<string, PendingQuestionEntry>();
 const autoAcceptSessions = new Map<string, boolean>();
@@ -93,6 +98,33 @@ export function listPendingQuestions(directory?: string | null): QuestionRequest
       result.push(entry.req);
     }
   }
+  return result;
+}
+
+/**
+ * Returns the pending blocking requests in the shape used by OpenChamber's
+ * cross-project session-status snapshot. The snapshot is keyed by session so
+ * a client that has not initialized that session's directory can still show
+ * its permission or question request.
+ */
+export function getPendingBlockingRequestsSnapshot(): Record<string, PendingBlockingRequestsSnapshotEntry> {
+  const result: Record<string, PendingBlockingRequestsSnapshotEntry> = {};
+
+  const entryFor = (sessionID: string): PendingBlockingRequestsSnapshotEntry => {
+    const existing = result[sessionID];
+    if (existing) return existing;
+    const created: PendingBlockingRequestsSnapshotEntry = { permissions: [], questions: [] };
+    result[sessionID] = created;
+    return created;
+  };
+
+  for (const request of listPendingPermissions()) {
+    entryFor(request.sessionID).permissions.push(request);
+  }
+  for (const request of listPendingQuestions()) {
+    entryFor(request.sessionID).questions.push(request);
+  }
+
   return result;
 }
 
