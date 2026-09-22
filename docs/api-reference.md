@@ -2,6 +2,10 @@
 
 `omp-openchamber-server` exposes an OpenCode-compatible HTTP and Server-Sent Events (SSE) API on port `4096` (configurable via `OC_SIDECAR_PORT`).
 
+OpenCode's `x-opencode-directory` request header is accepted as a URI-encoded
+directory scope. A `directory` query parameter takes precedence when both are
+present.
+
 ---
 
 ## Health & System
@@ -317,6 +321,10 @@ Returns the execution status (`busy` / `idle`) for all active sessions.
 }
 ```
 
+### `GET /session/active`
+Returns the OpenCode v2 global active-session snapshot. Each entry has
+`{ "type": "running" }`; idle sessions are omitted.
+
 ---
 
 ## Messages & Prompts
@@ -405,6 +413,15 @@ Interrupts active model generation on the session child process.
 
 ## Model Providers & Configuration
 
+### `GET /model`
+Returns the configured model catalog as a flat array of OpenCode model objects.
+Provider IDs are set on each model, including namespaced IDs when multiple
+backends are enabled.
+
+### `GET /model/default`
+Returns `{ "providerID": "...", "modelID": "..." }` for the active default
+model, or `null` if no default model is available.
+
 ### `GET /config/providers`
 Queries the OMP model catalog and formats it for OpenChamber.
 
@@ -482,9 +499,13 @@ data: {"payload":{"id":"evt_03","type":"session.status","properties":{"sessionID
 | Endpoint | Method | Behavior |
 |---|---|---|
 | `/permission` | `GET` | Returns pending tool permission requests. |
+| `/permission/request` | `GET` | OpenCode v2 alias for pending tool permission requests. |
 | `/permission/:id/reply` | `POST` | Confirms or rejects tool permission requests. |
 | `/question` | `GET` | Returns pending interactive user questions. |
 | `/question/:id/reply` | `POST` | Submits answers to interactive questions. |
+| `/form` | `GET` | Returns pending questions in OpenCode's typed form shape. |
+| `/session/:id/form/:formId/reply` | `POST` | Submits a typed form answer for a pending sidecar question. |
+| `/session/:id/form/:formId/cancel` | `POST` | Cancels a pending sidecar question exposed as a typed form. |
 | `/agent` | `GET` | Returns available agent personas (`[]` default). |
 | `/command` | `GET` | Returns available slash commands. |
 | `/skill` | `GET` | Returns registered agent skills. |

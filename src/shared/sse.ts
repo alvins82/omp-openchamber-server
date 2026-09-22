@@ -386,6 +386,14 @@ export function emitQuestionRejected(
   emitOpenCodeEvent("question.rejected", { sessionID, questionID }, directory);
 }
 
+export function emitFormCreated(form: Record<string, unknown>, directory?: string): void {
+  emitOpenCodeEvent("form.created", { form }, directory);
+}
+
+export function emitFormSettled(sessionID: string, formID: string, directory?: string): void {
+  emitOpenCodeEvent("form.settled", { sessionID, formID }, directory);
+}
+
 export function emitSessionCompactionStarted(sessionID: string, directory?: string): void {
   emitOpenCodeEvent("session.next.compaction.started", { sessionID }, directory);
 }
