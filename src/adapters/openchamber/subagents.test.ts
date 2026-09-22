@@ -126,6 +126,51 @@ describe("Subagents & Child Sessions Integration", () => {
     expect(messages[1].info.role).toBe("assistant");
   });
 
+  it("normalizes parent transcript paths for every child lookup", async () => {
+    const parent = await createOmpSession(TEST_DIR, { title: "Parent Task" });
+    const artifactDir = parent.path.replace(/\.jsonl$/, "");
+    await mkdir(artifactDir, { recursive: true });
+
+    const childUuids = [
+      "019ef37d-f6e3-7006-88ad-5025bade750d",
+      "019ef37d-f6e3-7006-88ad-5025bade750e",
+      "019ef37d-f6e3-7006-88ad-5025bade750f",
+    ];
+    const unrelatedParentUuid = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    await Promise.all(childUuids.map((childUuid, index) => {
+      const childHeader = {
+        type: "session",
+        version: 3,
+        id: childUuid,
+        timestamp: new Date().toISOString(),
+        cwd: TEST_DIR,
+        title: `Worker ${index + 1}`,
+        parentSession: index === 0
+          ? join(TEST_DIR, "other-parent", `${unrelatedParentUuid}.jsonl`)
+          : parent.path,
+        agent: "task",
+      };
+      return Bun.write(
+        join(artifactDir, `worker-${index + 1}.jsonl`),
+        `${JSON.stringify(childHeader)}\n`,
+      );
+    }));
+
+    const expectedChildIds = childUuids.map(toOpenCodeSessionId).sort();
+    const listed = await listOmpSessions(TEST_DIR);
+    const listedChildren = listed.filter((session) => expectedChildIds.includes(session.id));
+    expect(listedChildren.map((session) => session.id).sort()).toEqual(expectedChildIds);
+    expect(listedChildren.every((session) => session.parentID === parent.id)).toBe(true);
+
+    const children = await listOmpChildSessions(parent.id, TEST_DIR);
+    expect(children.map((session) => session.id).sort()).toEqual(expectedChildIds);
+
+    const fetchedChildren = await Promise.all(
+      expectedChildIds.map((childId) => getOmpSessionByOpenCodeId(childId, TEST_DIR)),
+    );
+    expect(fetchedChildren.every((session) => session?.parentID === parent.id)).toBe(true);
+  });
+
   it("handles subagent lifecycle events and translates to OpenCode SSE events", () => {
     const events: OpenCodeEvent[] = [];
     const unsub = subscribeOpenCodeEvents((e) => events.push(e));
