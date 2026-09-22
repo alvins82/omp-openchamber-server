@@ -28,7 +28,14 @@ type SSEEvent = { type: string; properties: Record<string, unknown> };
 
 const FAKE_HOME = mkdtempSync(join(tmpdir(), "oc-integ-"));
 const SPAWN_LOG = join(FAKE_HOME, "spawn.log");
-const FILE_A = join(FAKE_HOME, ".omp", "agent", "sessions", "-Users-alvin-proj", "a.jsonl");
+const FILE_A = join(
+  FAKE_HOME,
+  ".omp",
+  "agent",
+  "sessions",
+  "-Users-alvin-proj",
+  `2026-08-22T00-00-00-000Z_${UUID_A}.jsonl`,
+);
 const FILE_B = join(FAKE_HOME, ".omp", "agent", "sessions", "-elsewhere", "b.jsonl");
 
 function spawnLogLines(): number {
@@ -302,6 +309,48 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
 
     const nonMatch = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A) + "&search=Nomatch123xyz")).json();
     expect(nonMatch).toHaveLength(0);
+  });
+
+  test("GET /session/:id/children groups artifact children whose parent header is a path", async () => {
+    const artifactDir = FILE_A.replace(/\.jsonl$/, "");
+    const childUuids = [
+      "019ef37d-f6e3-7006-88ad-5025bade750d",
+      "019ef37d-f6e3-7006-88ad-5025bade750e",
+      "019ef37d-f6e3-7006-88ad-5025bade750f",
+    ];
+    mkdirSync(artifactDir, { recursive: true });
+
+    try {
+      for (const [index, childUuid] of childUuids.entries()) {
+        writeFileSync(
+          join(artifactDir, `worker-${index + 1}.jsonl`),
+          JSON.stringify({
+            type: "session",
+            id: childUuid,
+            cwd: DIR_A,
+            timestamp: "2026-08-22T00:00:00Z",
+            version: 3,
+            title: `Worker ${index + 1}`,
+            parentSession: FILE_A,
+            agent: "task",
+          }) + "\n",
+        );
+      }
+
+      const listed = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A))).json();
+      const childIds = childUuids.map((uuid) => "ses_" + uuid.replace(/-/g, ""));
+      const listedChildren = listed.filter((session: { id: string }) => childIds.includes(session.id));
+      expect(listedChildren).toHaveLength(3);
+      expect(listedChildren.every((session: { parentID?: string }) => session.parentID === SES_A)).toBe(true);
+
+      const response = await fetch(BASE + "session/" + SES_A + "/children");
+      expect(response.status).toBe(200);
+      const children = await response.json();
+      expect(children.map((session: { id: string }) => session.id).sort()).toEqual(childIds.sort());
+      expect(children.every((session: { parentID?: string }) => session.parentID === SES_A)).toBe(true);
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
   });
 
   test("GET /experimental/session?roots=true lists every project; limit and search bound it", async () => {

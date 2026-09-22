@@ -83,6 +83,54 @@ function isCanonicalOpenCodeSessionId(openCodeId: string): boolean {
   return /^ses_[0-9a-f]{32}$/i.test(openCodeId);
 }
 
+const OMP_UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}";
+const OMP_UUID_ONLY = new RegExp(`^(${OMP_UUID_PATTERN})$`, "i");
+const OMP_UUID_AT_END = new RegExp(`(${OMP_UUID_PATTERN})(?:\\.jsonl)?$`, "i");
+
+function extractOmpUuid(value: string): string | undefined {
+  return value.match(OMP_UUID_AT_END)?.[1];
+}
+
+/**
+ * Normalize a parent reference without treating an arbitrary transcript path
+ * as an OMP session id. OMP headers may store either an OpenCode id, a UUID,
+ * or the absolute path to the parent transcript.
+ */
+function normalizeSessionReference(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  if (isCanonicalOpenCodeSessionId(trimmed)) {
+    return `ses_${trimmed.slice(4).toLowerCase()}`;
+  }
+
+  const directUuid = trimmed.match(OMP_UUID_ONLY)?.[1];
+  if (directUuid) return toOpenCodeSessionId(directUuid);
+
+  const pathUuid = extractOmpUuid(trimmed);
+  if (pathUuid) return toOpenCodeSessionId(pathUuid);
+
+  // Preserve the existing fallback for non-path OMP aliases, but never turn a
+  // malformed absolute transcript path into `ses_/some/path`.
+  if (trimmed.includes("/") || trimmed.includes("\\") || /\.jsonl$/i.test(trimmed)) {
+    return undefined;
+  }
+  return toOpenCodeSessionId(trimmed);
+}
+
+/**
+ * Resolve the parent id exposed by the OpenCode session contract. A child
+ * artifact directory is authoritative because OMP can write a transcript-path
+ * parentSession header that otherwise loses the parent's UUID.
+ */
+function normalizeParentSessionId(
+  parentSession: string | undefined,
+  artifactParentReference?: string,
+): string | undefined {
+  return normalizeSessionReference(artifactParentReference) ?? normalizeSessionReference(parentSession);
+}
+
 /**
  * Read only the persisted session UUID from the header without waiting on the
  * async store scanner. Subagent lifecycle frames can arrive synchronously
@@ -289,8 +337,10 @@ export async function readSessionHeader(
 async function buildOpenCodeSession(
   header: SessionHeader,
   filePath: string,
+  artifactParentReference?: string,
 ): Promise<OpenCodeSession> {
   const openCodeId = toOpenCodeSessionId(header.id);
+  const parentID = normalizeParentSessionId(header.parentSession, artifactParentReference);
   const compactId = header.id.replace(/-/g, "");
   const first8 = compactId.slice(0, 8);
   const created = Date.parse(header.timestamp) || Date.now();
@@ -317,7 +367,7 @@ async function buildOpenCodeSession(
     directory: header.cwd,
     path: filePath,
     title,
-    ...(header.parentSession ? { parentID: toOpenCodeSessionId(header.parentSession) } : {}),
+    ...(parentID ? { parentID } : {}),
     agent: header.agent || "omp",
     model: header.model
       ? {
@@ -552,8 +602,7 @@ export async function listOmpSessions(
         if (limit !== undefined && sessions.length >= limit) break;
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
-        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
+        const parentOmpUuid = extractOmpUuid(ent.name);
 
         let subFiles: string[];
         try {
@@ -567,9 +616,6 @@ export async function listOmpSessions(
           const subFilePath = join(subDirPath, subFile);
           const subHeader = await readSessionHeader(subFilePath);
           if (!subHeader) continue;
-          if (!subHeader.parentSession && parentOmpUuid) {
-            subHeader.parentSession = parentOmpUuid;
-          }
           if (!subHeader.title) {
             subHeader.title = subFile.slice(0, -6);
           }
@@ -587,7 +633,7 @@ export async function listOmpSessions(
             }
           }
 
-          sessions.push(await buildOpenCodeSession(subHeader, subFilePath));
+          sessions.push(await buildOpenCodeSession(subHeader, subFilePath, parentOmpUuid));
           if (limit !== undefined && sessions.length >= limit) break;
         }
       }
@@ -649,8 +695,7 @@ export async function getOmpSessionByOpenCodeId(
         }
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
-        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
+        const parentOmpUuid = extractOmpUuid(ent.name);
 
         let subFiles: string[];
         try {
@@ -673,14 +718,11 @@ export async function getOmpSessionByOpenCodeId(
               normalizeSessionAlias(subHeader.title ?? "") === requestedAlias
             ))
           ) {
-            if (!subHeader.parentSession && parentOmpUuid) {
-              subHeader.parentSession = parentOmpUuid;
-            }
             if (!subHeader.title) {
               subHeader.title = subFile.slice(0, -6);
             }
             if (directory && subHeader.cwd !== directory) continue;
-            return buildOpenCodeSession(subHeader, subFilePath);
+            return buildOpenCodeSession(subHeader, subFilePath, parentOmpUuid);
           }
         }
       }
