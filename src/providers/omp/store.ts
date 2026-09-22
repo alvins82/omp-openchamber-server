@@ -27,10 +27,6 @@ function homePrefix(): string {
   return Bun.env.HOME! + "/";
 }
 
-const OMP_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const OMP_COMPACT_UUID_RE = /^[0-9a-f]{32}$/i;
-const OMP_SESSION_UUID_SUFFIX_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$/i;
-
 interface SessionHeader {
   id: string;
   cwd: string;
@@ -85,56 +81,6 @@ function normalizeSessionAlias(value: string): string {
 
 function isCanonicalOpenCodeSessionId(openCodeId: string): boolean {
   return /^ses_[0-9a-f]{32}$/i.test(openCodeId);
-}
-
-function normalizeOmpSessionUuid(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (OMP_UUID_RE.test(trimmed) || OMP_COMPACT_UUID_RE.test(trimmed)) return trimmed;
-  return undefined;
-}
-
-function extractSessionUuidFromJsonlPath(value: string): string | undefined {
-  const normalized = value.replace(/\\/g, "/");
-  const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
-  if (!/\.jsonl$/i.test(fileName)) return undefined;
-  return fileName.slice(0, -".jsonl".length).match(OMP_SESSION_UUID_SUFFIX_RE)?.[1];
-}
-
-function extractSessionUuidFromArtifactDirectory(value: string): string | undefined {
-  return value.match(OMP_SESSION_UUID_SUFFIX_RE)?.[1];
-}
-
-/**
- * Normalize the parent reference stored in an OMP child header.
- *
- * OMP currently persists the parent transcript path, while OpenCode exposes
- * the parent's canonical `ses_<32 hex>` id. The artifact directory is the
- * authoritative relationship because it is named after the parent session;
- * use it before the header value whenever it is available.
- */
-export function normalizeParentSessionId(
-  parentSession?: string,
-  authoritativeParentUuid?: string,
-): string | undefined {
-  const authoritative = authoritativeParentUuid
-    ? normalizeOmpSessionUuid(authoritativeParentUuid)
-    : undefined;
-  if (authoritative) return toOpenCodeSessionId(authoritative);
-
-  if (!parentSession) return undefined;
-  const trimmed = parentSession.trim();
-  if (isCanonicalOpenCodeSessionId(trimmed)) return trimmed;
-
-  const directUuid = normalizeOmpSessionUuid(trimmed);
-  if (directUuid) return toOpenCodeSessionId(directUuid);
-
-  const pathUuid = extractSessionUuidFromJsonlPath(trimmed);
-  if (pathUuid) return toOpenCodeSessionId(pathUuid);
-
-  // Keep non-canonical OpenCode aliases intact for older OMP artifacts, but
-  // never pass an arbitrary filesystem path through as a session id.
-  if (/^ses_[^/\\]+$/i.test(trimmed)) return trimmed;
-  return undefined;
 }
 
 /**
@@ -343,10 +289,8 @@ export async function readSessionHeader(
 async function buildOpenCodeSession(
   header: SessionHeader,
   filePath: string,
-  authoritativeParentUuid?: string,
 ): Promise<OpenCodeSession> {
   const openCodeId = toOpenCodeSessionId(header.id);
-  const parentID = normalizeParentSessionId(header.parentSession, authoritativeParentUuid);
   const compactId = header.id.replace(/-/g, "");
   const first8 = compactId.slice(0, 8);
   const created = Date.parse(header.timestamp) || Date.now();
@@ -373,7 +317,7 @@ async function buildOpenCodeSession(
     directory: header.cwd,
     path: filePath,
     title,
-    ...(parentID ? { parentID } : {}),
+    ...(header.parentSession ? { parentID: toOpenCodeSessionId(header.parentSession) } : {}),
     agent: header.agent || "omp",
     model: header.model
       ? {
@@ -439,7 +383,6 @@ export async function createOmpSession(
       title: options?.title,
       timestamp,
       version: "3",
-      parentSession: options?.parentID ? fromOpenCodeSessionId(options.parentID) : undefined,
     },
     filePath,
   );
@@ -609,7 +552,8 @@ export async function listOmpSessions(
         if (limit !== undefined && sessions.length >= limit) break;
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentOmpUuid = extractSessionUuidFromArtifactDirectory(ent.name);
+        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
 
         let subFiles: string[];
         try {
@@ -623,6 +567,9 @@ export async function listOmpSessions(
           const subFilePath = join(subDirPath, subFile);
           const subHeader = await readSessionHeader(subFilePath);
           if (!subHeader) continue;
+          if (!subHeader.parentSession && parentOmpUuid) {
+            subHeader.parentSession = parentOmpUuid;
+          }
           if (!subHeader.title) {
             subHeader.title = subFile.slice(0, -6);
           }
@@ -640,7 +587,7 @@ export async function listOmpSessions(
             }
           }
 
-          sessions.push(await buildOpenCodeSession(subHeader, subFilePath, parentOmpUuid));
+          sessions.push(await buildOpenCodeSession(subHeader, subFilePath));
           if (limit !== undefined && sessions.length >= limit) break;
         }
       }
@@ -702,7 +649,8 @@ export async function getOmpSessionByOpenCodeId(
         }
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentOmpUuid = extractSessionUuidFromArtifactDirectory(ent.name);
+        const parentUuidMatch = ent.name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+        const parentOmpUuid = parentUuidMatch ? parentUuidMatch[1] : undefined;
 
         let subFiles: string[];
         try {
@@ -725,11 +673,14 @@ export async function getOmpSessionByOpenCodeId(
               normalizeSessionAlias(subHeader.title ?? "") === requestedAlias
             ))
           ) {
+            if (!subHeader.parentSession && parentOmpUuid) {
+              subHeader.parentSession = parentOmpUuid;
+            }
             if (!subHeader.title) {
               subHeader.title = subFile.slice(0, -6);
             }
             if (directory && subHeader.cwd !== directory) continue;
-            return buildOpenCodeSession(subHeader, subFilePath, parentOmpUuid);
+            return buildOpenCodeSession(subHeader, subFilePath);
           }
         }
       }

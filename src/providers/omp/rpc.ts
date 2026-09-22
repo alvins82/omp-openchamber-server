@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendCredentials, OpenCodeModel, OpenCodeProvider, OpenCodeProvidersResponse } from "../types";
@@ -92,31 +92,6 @@ export interface OmpRpcSpawnOptions {
   noTools?: boolean;
   /** Do not load sidecar/project extensions into this embedded OMP child. */
   disableExtensions?: boolean;
-}
-
-/** Stable error for RPC operations whose persisted session cwd was removed. */
-export class MissingWorkingDirectoryError extends Error {
-  readonly code = "MISSING_WORKING_DIRECTORY";
-  readonly reason = "missing-working-directory";
-  readonly statusCode = 404;
-  readonly cwd: string;
-
-  constructor(cwd: string) {
-    super(`Working directory does not exist: ${cwd}`);
-    this.name = "MissingWorkingDirectoryError";
-    this.cwd = cwd;
-  }
-}
-
-function assertWorkingDirectory(cwd: string): void {
-  try {
-    if (!statSync(cwd).isDirectory()) throw new MissingWorkingDirectoryError(cwd);
-  } catch (error) {
-    if (error instanceof MissingWorkingDirectoryError) throw error;
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") throw new MissingWorkingDirectoryError(cwd);
-    throw error;
-  }
 }
 
 export interface OmpRpcModel {
@@ -227,7 +202,6 @@ export class OmpRpcConnection {
     maxAttempts = 3,
     options: OmpRpcSpawnOptions = {},
   ): Promise<OmpRpcConnection> {
-    assertWorkingDirectory(cwd);
     const omp = resolveOmpBinary();
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

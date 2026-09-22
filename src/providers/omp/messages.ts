@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { MissingWorkingDirectoryError, withOmpRpc } from "./rpc";
+import { withOmpRpc } from "./rpc";
 import { getOmpSessionByOpenCodeId } from "./store";
 import { sessionLogger } from "../../shared/logger";
 import {
@@ -995,7 +995,6 @@ export async function loadMessagesFromFile(
   }
 
   const messages: AgentMessage[] = [];
-  let hasSessionHeader = false;
 
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
@@ -1007,8 +1006,6 @@ export async function loadMessagesFromFile(
     } catch {
       continue;
     }
-
-    if (entry.type === "session") hasSessionHeader = true;
 
     if (entry.type === "compaction") {
       let timestamp = typeof entry.timestamp === "number" ? entry.timestamp : undefined;
@@ -1047,10 +1044,7 @@ export async function loadMessagesFromFile(
     messages.push({ ...message, id, timestamp } as unknown as AgentMessage);
   }
 
-  // A readable session file with no message records is a valid empty
-  // transcript. Returning [] keeps it distinct from a file read failure
-  // (null), so callers do not spawn OMP just to read an empty session.
-  if (messages.length === 0) return hasSessionHeader ? [] : null;
+  if (messages.length === 0) return null;
   return mapRpcMessagesToOpenCodeRecords(messages, openCodeId, dbPath);
 }
 
@@ -1093,10 +1087,9 @@ export async function loadSessionMessages(
       throw new Error(`no session found for ${openCodeId} in ${cwd}`);
     }
     const fromFile = await loadMessagesFromFile(session.path, openCodeId, dbPath);
-    if (fromFile !== null) return fromFile;
+    if (fromFile) return fromFile;
     return loadFromRpc(openCodeId, cwd, dbPath);
   })().catch((err) => {
-    if (err instanceof MissingWorkingDirectoryError) throw err;
     throw new Error(`Failed to load messages for ${openCodeId}: ${err instanceof Error ? err.message : String(err)}`);
   });
   inflightLoads.set(key, promise);

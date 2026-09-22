@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MissingWorkingDirectoryError, OmpRpcConnection, type OmpRpcChild, type OmpRpcEvent } from "./rpc";
+import { OmpRpcConnection, type OmpRpcChild, type OmpRpcEvent } from "./rpc";
 
 /**
  * In-process fake of the OMP child process. `OmpRpcConnection.fromChild`
@@ -68,18 +68,6 @@ function open(
 const settle = () => new Promise<void>((r) => setTimeout(r, 0));
 
 describe("OmpRpcConnection (in-process transport)", () => {
-  test("rejects a missing working directory with a stable structured error before spawning", async () => {
-    const cwd = `/tmp/omp-missing-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await expect(OmpRpcConnection.spawn(cwd, 1)).rejects.toBeInstanceOf(MissingWorkingDirectoryError);
-    await expect(OmpRpcConnection.spawn(cwd, 1)).rejects.toMatchObject({
-      code: "MISSING_WORKING_DIRECTORY",
-      reason: "missing-working-directory",
-      statusCode: 404,
-      cwd,
-      message: `Working directory does not exist: ${cwd}`,
-    });
-  });
-
   test("correlates request and response by id and resolves with data", async () => {
     const s = makeStdout();
     const { child, written } = makeChild();
