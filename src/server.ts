@@ -1905,6 +1905,17 @@ const MIME_TYPES: Record<string, string> = {
       });
     }
 
+    if (p === "/location" && req.method === "GET") {
+      return json({
+        directory: effectiveDir,
+        project: {
+          id: "global",
+          directory: effectiveDir,
+          canonical: effectiveDir,
+        },
+      });
+    }
+
     // Path
     if (p === "/path" && req.method === "GET") {
       const home = Bun.env.HOME || "";

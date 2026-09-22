@@ -36,6 +36,23 @@ Returns resolved path information for the given directory.
 }
 ```
 
+### `GET /location`
+Returns the resolved directory and project identity for the active location.
+The sidecar exposes its current directory as the global project.
+
+- **Query Parameters**: `directory` (string, optional)
+- **Response `200 OK`**:
+```json
+{
+  "directory": "/path/to/project",
+  "project": {
+    "id": "global",
+    "directory": "/path/to/project",
+    "canonical": "/path/to/project"
+  }
+}
+```
+
 ### `GET /project`
 Returns active project workspace metadata.
 
