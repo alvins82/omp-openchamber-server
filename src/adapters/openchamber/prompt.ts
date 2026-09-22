@@ -9,6 +9,7 @@ import type {
   OpenCodePromptTextPart,
   ToolPartState,
   TokenBreakdown,
+  TurnPromptInput,
   TurnTelemetry,
 } from "../../providers/types";
 import { CredentialInputError, credentialInputFingerprint } from "../../providers/omp/credentials";
@@ -53,9 +54,12 @@ interface OpenCodeTextPart {
 
 type OpenCodePart = OpenCodeTextPart | { type: "file" | "image" | string; [key: string]: unknown } | Record<string, unknown>;
 
+type PromptDelivery = "steer";
+
 interface PromptBody {
   parts?: OpenCodePart[];
   messageID?: string;
+  delivery?: PromptDelivery;
   model?: { providerID?: string; modelID?: string };
   variant?: string;
   credentials?: BackendCredentialInput["credentials"];
@@ -133,6 +137,7 @@ function isPromptBody(value: unknown): value is PromptBody {
   if (value == null || typeof value !== "object") return false;
   if ("parts" in value && !Array.isArray(value.parts)) return false;
   if ("messageID" in value && typeof value.messageID !== "string") return false;
+  if ("delivery" in value && value.delivery !== "steer") return false;
   if ("model" in value && value.model !== null && typeof value.model === "object") {
     const model = value.model as Record<string, unknown>;
     if ("providerID" in model && typeof model.providerID !== "string") return false;
@@ -412,6 +417,103 @@ function emitAssistantPart(
     },
     directory,
   );
+}
+
+function buildPromptPayload(
+  message: string,
+  images: ImageContent[],
+  streamingBehavior?: TurnPromptInput["streamingBehavior"],
+): TurnPromptInput {
+  return {
+    message,
+    ...(images.length > 0 ? { images } : {}),
+    ...(streamingBehavior ? { streamingBehavior } : {}),
+  };
+}
+
+function recordAndEmitUserPrompt(
+  state: SessionState,
+  parentMessageID: string | undefined,
+  promptText: string,
+  promptTextParts: OpenCodePromptTextPart[],
+  body: PromptBody,
+): void {
+  if (!parentMessageID) return;
+
+  const { openCodeId, cwd, currentModel } = state;
+  backendForSession(openCodeId).store.recordUserMessage?.(
+    openCodeId,
+    promptText,
+    parentMessageID,
+    promptTextParts,
+  );
+  const userMsgTime = Date.now() - 1;
+  emitMessageUpdated(
+    {
+      info: {
+        id: parentMessageID,
+        sessionID: openCodeId,
+        role: "user",
+        agent: "omp",
+        model: {
+          id: currentModel.modelID,
+          providerID: currentModel.providerID,
+          modelID: currentModel.modelID,
+          variant: currentModel.variant,
+        },
+        time: { created: userMsgTime, completed: userMsgTime },
+      },
+    },
+    cwd,
+  );
+
+  let nextPartIndex = promptTextParts.length;
+
+  // Emit file/image parts before text parts so OpenChamber's event-reducer
+  // replaces optimistic file parts in place (it gates optimistic part replacement
+  // on the first part lacking sessionID). Emitting text first assigns sessionID
+  // to part 0, causing subsequent file parts to be appended as duplicates.
+  if (Array.isArray(body.parts)) {
+    for (const part of body.parts) {
+      if (part && typeof part === "object" && "type" in part && (part.type === "file" || part.type === "image")) {
+        const p = part as Record<string, unknown>;
+        const mime = (typeof p.mime === "string" ? p.mime : undefined) ||
+                     (typeof p.mimeType === "string" ? p.mimeType : undefined) ||
+                     "image/png";
+        const url = typeof p.url === "string"
+          ? p.url
+          : (typeof p.data === "string" ? `data:${mime};base64,${p.data}` : "");
+        emitMessagePartUpdated(
+          openCodeId,
+          {
+            id: (typeof p.id === "string" ? p.id : undefined) || `part_${openCodeId}_${parentMessageID}_${nextPartIndex++}`,
+            type: "file",
+            mime,
+            url,
+            ...(p.filename ? { filename: p.filename } : {}),
+            messageID: parentMessageID,
+            sessionID: openCodeId,
+          },
+          cwd,
+        );
+      }
+    }
+  }
+
+  for (const [index, part] of promptTextParts.entries()) {
+    emitMessagePartUpdated(
+      openCodeId,
+      {
+        id: `part_${openCodeId}_${parentMessageID}_${index}`,
+        type: "text",
+        text: part.text,
+        ...(part.synthetic === true ? { synthetic: true } : {}),
+        messageID: parentMessageID,
+        sessionID: openCodeId,
+      },
+      cwd,
+    );
+  }
 }
 
 
@@ -841,7 +943,19 @@ export async function promptSessionAsync(
     }
 
     if (state.busy) {
-      return { queued: false, error: "session busy", status: 409 };
+      if (body.delivery !== "steer") {
+        return { queued: false, error: "session busy", status: 409 };
+      }
+
+      // Steering is an additional input to the active OMP turn, not a second
+      // sidecar turn. Keep the existing event subscription and busy lifecycle
+      // intact while forwarding OMP's streaming behavior explicitly.
+      recordAndEmitUserPrompt(state, body.messageID, promptText, promptTextParts, body);
+      void state.conn.prompt(buildPromptPayload(promptText, images, "steer")).catch((err) => {
+        emitSessionError(openCodeId, err, cwd);
+        promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} steering acknowledgement failed`);
+      });
+      return { queued: true };
     }
 
     state.busy = true;
@@ -854,85 +968,23 @@ export async function promptSessionAsync(
       state.currentModel = defaultModelRef(modelRef);
     }
 
-    if (parentMessageID) {
-      backendForSession(openCodeId).store.recordUserMessage?.(
-        openCodeId,
-        promptText,
-        parentMessageID,
-        promptTextParts,
-      );
-      const userMsgTime = Date.now() - 1;
-      emitMessageUpdated(
-        {
-          info: {
-            id: parentMessageID,
-            sessionID: openCodeId,
-            role: "user",
-            agent: "omp",
-            model: {
-              id: state.currentModel.modelID,
-              providerID: state.currentModel.providerID,
-              modelID: state.currentModel.modelID,
-              variant: state.currentModel.variant,
-            },
-            time: { created: userMsgTime, completed: userMsgTime },
-          },
-        },
-        cwd,
-      );
-
-      let nextPartIndex = promptTextParts.length;
-
-      // Emit file/image parts before text parts so OpenChamber's event-reducer
-      // replaces optimistic file parts in place (it gates optimistic part replacement
-      // on the first part lacking sessionID). Emitting text first assigns sessionID
-      // to part 0, causing subsequent file parts to be appended as duplicates.
-      if (Array.isArray(body.parts)) {
-        for (const part of body.parts) {
-          if (part && typeof part === "object" && "type" in part && (part.type === "file" || part.type === "image")) {
-            const p = part as Record<string, unknown>;
-            const mime = (typeof p.mime === "string" ? p.mime : undefined) ||
-                         (typeof p.mimeType === "string" ? p.mimeType : undefined) ||
-                         "image/png";
-            const url = typeof p.url === "string"
-              ? p.url
-              : (typeof p.data === "string" ? `data:${mime};base64,${p.data}` : "");
-            emitMessagePartUpdated(
-              openCodeId,
-              {
-                id: (typeof p.id === "string" ? p.id : undefined) || `part_${openCodeId}_${parentMessageID}_${nextPartIndex++}`,
-                type: "file",
-                mime,
-                url,
-                ...(p.filename ? { filename: p.filename } : {}),
-                messageID: parentMessageID,
-                sessionID: openCodeId,
-              },
-              cwd,
-            );
-          }
-        }
-      }
-
-      for (const [index, part] of promptTextParts.entries()) {
-        emitMessagePartUpdated(
-          openCodeId,
-          {
-            id: `part_${openCodeId}_${parentMessageID}_${index}`,
-            type: "text",
-            text: part.text,
-            ...(part.synthetic === true ? { synthetic: true } : {}),
-            messageID: parentMessageID,
-            sessionID: openCodeId,
-          },
-          cwd,
-        );
-      }
-    }
+    recordAndEmitUserPrompt(state, parentMessageID, promptText, promptTextParts, body);
 
     (async () => {
       let completed = false;
+      const { promise: completion, resolve: markComplete } = Promise.withResolvers<void>();
+      const complete = () => {
+        if (completed) return;
+        completed = true;
+        markComplete();
+      };
+
       try {
+        state.unsubscribe();
+        state.unsubscribe = state.conn.onEvent(
+          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, cwd),
+        );
+
         if (modelRef) {
           try {
             await state.conn.setModel(nativeProviderID(modelRef.providerID), modelRef.modelID);
@@ -941,27 +993,9 @@ export async function promptSessionAsync(
           }
         }
 
-        const { promise: completion, resolve: markComplete } = Promise.withResolvers<void>();
-
-        const complete = () => {
-          if (completed) return;
-          completed = true;
-          markComplete();
-        };
-
-        state.unsubscribe();
-        state.unsubscribe = state.conn.onEvent(
-          createEventHandler(openCodeId, parentMessageID, state.currentModel, complete, cwd),
+        await state.conn.prompt(
+          buildPromptPayload(promptText, images, body.delivery === "steer" ? "steer" : undefined),
         );
-
-        const promptPayload: { message: string; images?: ImageContent[] } = {
-          message: promptText,
-        };
-        if (images.length > 0) {
-          promptPayload.images = images;
-        }
-
-        await state.conn.prompt(promptPayload);
         await completion;
 
         if (visiblePromptText && !isLowSignalTitleInput(visiblePromptText)) {
