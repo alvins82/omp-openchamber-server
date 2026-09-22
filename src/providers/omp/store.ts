@@ -124,7 +124,7 @@ function normalizeSessionReference(value: string | undefined): string | undefine
  * artifact directory is authoritative because OMP can write a transcript-path
  * parentSession header that otherwise loses the parent's UUID.
  */
-function normalizeParentSessionId(
+export function normalizeParentSessionId(
   parentSession: string | undefined,
   artifactParentReference?: string,
 ): string | undefined {
@@ -433,6 +433,7 @@ export async function createOmpSession(
       title: options?.title,
       timestamp,
       version: "3",
+      parentSession: options?.parentID ? fromOpenCodeSessionId(options.parentID) : undefined,
     },
     filePath,
   );
