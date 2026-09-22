@@ -30,12 +30,16 @@ import {
   emitPermissionReplied,
   emitQuestionReplied,
   emitQuestionRejected,
+  emitFormCreated,
+  emitFormSettled,
   emitSessionCompactionStarted,
   emitSessionCompacted,
 } from "../../shared/sse";
 import {
   addPendingPermission,
   addPendingQuestion,
+  toOpenCodePermissionRequest,
+  toOpenCodeFormRequest,
   clearSessionApprovals,
   type PermissionRequest,
   type QuestionRequest,
@@ -745,7 +749,7 @@ export function createEventHandler(
           emitPermissionReplied(permReq.sessionID, permReq.id, res.cancelled ? "reject" : "once", cwd);
           event.respond(res);
         });
-        emitPermissionAsked(permReq as unknown as Record<string, unknown>, cwd);
+        emitPermissionAsked(toOpenCodePermissionRequest(permReq) as unknown as Record<string, unknown>, cwd);
         return;
       }
       case "question_request": {
@@ -763,9 +767,11 @@ export function createEventHandler(
           } else {
             emitQuestionReplied(qReq.sessionID, qReq.id, [[res.value ?? ""]], cwd);
           }
+          emitFormSettled(qReq.sessionID, qReq.id, cwd);
           event.respond(res);
         });
         emitQuestionAsked(qReq as unknown as Record<string, unknown>, cwd);
+        emitFormCreated(toOpenCodeFormRequest(qReq) as unknown as Record<string, unknown>, cwd);
         return;
       }
       case "compaction_start": {

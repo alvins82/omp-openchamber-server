@@ -13,12 +13,60 @@ export interface PermissionRequest {
   directory?: string;
 }
 
+/** Adds the OpenCode v2 field names while retaining the sidecar's legacy ones. */
+export function toOpenCodePermissionRequest(request: PermissionRequest) {
+  return {
+    ...request,
+    action: request.permission,
+    resources: request.patterns,
+  };
+}
+
 export interface QuestionRequest {
   id: string;
   sessionID: string;
   questions: QuestionInfo[];
   tool?: { messageID: string; callID: string };
   directory?: string;
+}
+
+/**
+ * Adapts the sidecar's legacy question request to OpenCode's typed form wire
+ * shape. Field keys are stable for the lifetime of the request so a reply can
+ * be mapped back to the original question order.
+ */
+export function toOpenCodeFormRequest(request: QuestionRequest) {
+  return {
+    id: request.id,
+    sessionID: request.sessionID,
+    title: request.questions[0]?.header || "Input needed",
+    fields: request.questions.map((question, index) => ({
+      key: `question_${index + 1}`,
+      title: question.question,
+      type: question.multiple ? "multiselect" : "string",
+      required: true,
+      custom: question.custom ?? false,
+      options: question.options.map((option) => ({
+        value: option.label,
+        label: option.label,
+        ...(option.description ? { description: option.description } : {}),
+      })),
+    })),
+  };
+}
+
+/** Converts a typed form answer into the legacy question tool's ordered values. */
+export function toQuestionAnswers(
+  request: QuestionRequest,
+  answer: Record<string, unknown>,
+): string[][] {
+  return request.questions.map((_, index) => {
+    const value = answer[`question_${index + 1}`];
+    if (Array.isArray(value)) return value.map((entry) => String(entry));
+    if (typeof value === "string") return value.length > 0 ? [value] : [];
+    if (typeof value === "number" || typeof value === "boolean") return [String(value)];
+    return [];
+  });
 }
 
 interface PendingPermissionEntry {

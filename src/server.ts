@@ -25,6 +25,9 @@ import {
   rejectQuestion,
   getAutoAcceptPolicy,
   setSessionAutoAccept,
+  toOpenCodePermissionRequest,
+  toOpenCodeFormRequest,
+  toQuestionAnswers,
 } from "./adapters/openchamber/approvals";
 import {
   promptSessionAsync,
@@ -193,6 +196,7 @@ function emptyProjectSetup(projectPath: string) {
 }
 
 const providerCache = new Map<string, { data: OpenCodeProvidersResponse; expiresAt: number }>();
+const providerInFlight = new Map<string, Promise<OpenCodeProvidersResponse>>();
 let globalProviderCache: { data: OpenCodeProvidersResponse; expiresAt: number } | null = null;
 
 export const browserControlBroker = new BrowserControlBroker({
@@ -204,11 +208,31 @@ async function fetchProvidersForDirectory(cwd: string): Promise<OpenCodeProvider
   if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
-  const response = await listProviders(cwd);
-  const entry = { data: response, expiresAt: Date.now() + 120_000 };
-  providerCache.set(cwd, entry);
-  globalProviderCache = entry;
-  return response;
+  const existing = providerInFlight.get(cwd);
+  if (existing) return existing;
+
+  const request = listProviders(cwd)
+    .then((response) => {
+      const entry = { data: response, expiresAt: Date.now() + 120_000 };
+      providerCache.set(cwd, entry);
+      globalProviderCache = entry;
+      return response;
+    })
+    .finally(() => {
+      if (providerInFlight.get(cwd) === request) providerInFlight.delete(cwd);
+    });
+  providerInFlight.set(cwd, request);
+  return request;
+}
+
+function resolveOpenCodeDirectoryHeader(req: Request): string | undefined {
+  const header = req.headers.get("x-opencode-directory");
+  if (!header) return undefined;
+  try {
+    return decodeURIComponent(header);
+  } catch {
+    return header;
+  }
 }
 
 /**
@@ -402,7 +426,7 @@ const server = Bun.serve<SidecarWebSocketData>({
 
     const url = new URL(req.url);
     const path = url.pathname;
-    const dir = url.searchParams.get("directory") ?? undefined;
+    const dir = url.searchParams.get("directory") ?? resolveOpenCodeDirectoryHeader(req);
     const effectiveDir = dir ?? process.cwd();
 
     if (path === "/api/global/event/ws" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
@@ -485,9 +509,15 @@ const server = Bun.serve<SidecarWebSocketData>({
             lastUpdateAt: now,
           }]),
         );
+        const pending = Object.fromEntries(
+          Object.entries(getPendingBlockingRequestsSnapshot()).map(([sessionID, requests]) => [sessionID, {
+            permissions: requests.permissions.map(toOpenCodePermissionRequest),
+            forms: requests.questions.map(toOpenCodeFormRequest),
+          }]),
+        );
         return json({
           sessions,
-          pending: getPendingBlockingRequestsSnapshot(),
+          pending,
           serverTime: now,
         });
       }
@@ -1350,6 +1380,37 @@ const MIME_TYPES: Record<string, string> = {
         return json(getSessionStatusMap(dir));
       }
 
+      // OpenCode v2 reports the global set of sessions with an active agent
+      // loop and uses "running" as its status value.
+      if (p === "/session/active" && req.method === "GET") {
+        await reconcileSessionStatuses();
+        const statuses = getSessionStatusMap();
+        return json(Object.fromEntries(Object.keys(statuses).map((sessionID) => [sessionID, { type: "running" }])));
+      }
+
+      // Adapt OpenCode's typed form actions to the sidecar's pending question
+      // requests. The pending question id is the form id on the wire.
+      const formReplyMatch = p.match(/^\/session\/([^/]+)\/form\/([^/]+)\/reply$/);
+      if (formReplyMatch && req.method === "POST") {
+        const [, sessionID, formID] = formReplyMatch;
+        const pending = getPendingQuestion(formID!);
+        if (!pending || pending.sessionID !== sessionID) return jsonError("form not found", 404);
+        const body = asRecord(await readJson(req));
+        const answer = asRecord(body?.answer);
+        if (!answer) return jsonError("answer required", 400);
+        const ok = replyQuestion(formID!, toQuestionAnswers(pending, answer));
+        return json(ok);
+      }
+
+      const formCancelMatch = p.match(/^\/session\/([^/]+)\/form\/([^/]+)\/cancel$/);
+      if (formCancelMatch && req.method === "POST") {
+        const [, sessionID, formID] = formCancelMatch;
+        const pending = getPendingQuestion(formID!);
+        if (!pending || pending.sessionID !== sessionID) return jsonError("form not found", 404);
+        const ok = rejectQuestion(formID!);
+        return json(ok);
+      }
+
       // Single session routes: /session/:id
       const sMatch = p.match(/^\/session\/([^/]+)$/);
       if (sMatch) {
@@ -1719,6 +1780,35 @@ const MIME_TYPES: Record<string, string> = {
       }
     }
 
+    // OpenCode v2 exposes a flat model list alongside the provider catalog.
+    // The sidecar's existing catalog is grouped by provider; keep the wire
+    // model shape and normalize provider ids for multi-backend mode.
+    if (p === "/model" && req.method === "GET") {
+      try {
+        const providersData = await fetchProvidersForDirectory(dir ?? process.cwd());
+        const models = providersData.providers.flatMap((provider) =>
+          Object.values(provider.models).map((model) => ({ ...model, providerID: provider.id })),
+        );
+        return json(models);
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "model list failed", 500);
+      }
+    }
+
+    // listModels orders the current provider and model first, so the model at
+    // the head of the configured default provider is the active default.
+    if (p === "/model/default" && req.method === "GET") {
+      try {
+        const providersData = await fetchProvidersForDirectory(dir ?? process.cwd());
+        const provider = providersData.providers.find((entry) => entry.id === providersData.default.default);
+        if (!provider) return json(null);
+        const model = Object.values(provider.models)[0];
+        return json(model ? { providerID: provider.id, modelID: model.id } : null);
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "default model lookup failed", 500);
+      }
+    }
+
     // File content / file listing / find file
     if (p === "/file/content" && req.method === "GET") {
       const filePath = url.searchParams.get("path");
@@ -1852,6 +1942,14 @@ const MIME_TYPES: Record<string, string> = {
     }
 
     // Questions & Permissions
+    if (p === "/form" && req.method === "GET") {
+      return json(listPendingQuestions(dir).map(toOpenCodeFormRequest));
+    }
+
+    if (p === "/permission/request" && req.method === "GET") {
+      return json(listPendingPermissions(dir).map(toOpenCodePermissionRequest));
+    }
+
     if (p === "/permission" && req.method === "GET") {
       return json(listPendingPermissions(dir));
     }
