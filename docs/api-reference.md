@@ -126,6 +126,37 @@ treat Linear as disconnected instead of logging a missing route.
 Linear authorization, issue, mapping, and session-status routes are not
 implemented by the sidecar.
 
+## OpenChamber compatibility snapshots
+
+### `GET /api/guests`
+
+Returns the OpenChamber guest-extension catalog. The sidecar does not manage
+OpenChamber guest packages, so it returns an explicit empty catalog:
+
+```json
+{ "guests": [] }
+```
+
+### `GET /api/sessions/status`
+
+Returns the cross-project status snapshot used by OpenChamber's global status
+seed. Unlike `GET /session/status`, which returns the native OpenCode status
+map, this route wraps each active status with a server timestamp and includes
+pending permissions/questions:
+
+```json
+{
+  "sessions": {
+    "ses_123": {
+      "status": "busy",
+      "lastUpdateAt": 1756001000000
+    }
+  },
+  "pending": {},
+  "serverTime": 1756001000000
+}
+```
+
 ## Git
 
 Git routes use the local `git` executable and accept the repository directory
@@ -341,6 +372,7 @@ Enqueues a turn prompt to the OMP child process.
     "providerID": "llama.cpp",
     "modelID": "qwen3.8-27b"
   },
+  "delivery": "steer",
   "credentials": {
     "apiKey": "...",
     "baseUrl": "https://api.example.com/v1"
@@ -356,8 +388,13 @@ field retain OMP's existing host-local provider configuration. See
 [`providers.md`](providers.md#caller-owned-credentials-opt-in) for the
 credential shape and resolver contract.
 
+Set `delivery` to `"steer"` to add input to an already-running OMP turn. The
+sidecar forwards this as OMP's `streamingBehavior: "steer"` and keeps the
+session busy until the active turn reaches its terminal event. The field is
+optional for ordinary prompts.
+
 - **Response `200 OK`**: `{"queued": true}`
-- **Response `409 Conflict`**: `{"error": "session busy"}` (if a turn is already executing on this session).
+- **Response `409 Conflict`**: `{"error": "session busy"}` (if an ordinary prompt is sent while a turn is already executing on this session).
 
 ### `POST /session/:id/abort`
 Interrupts active model generation on the session child process.

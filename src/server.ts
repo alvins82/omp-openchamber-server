@@ -19,6 +19,7 @@ import {
   listPendingQuestions,
   getPendingPermission,
   getPendingQuestion,
+  getPendingBlockingRequestsSnapshot,
   replyPermission,
   replyQuestion,
   rejectQuestion,
@@ -462,6 +463,32 @@ const server = Bun.serve<SidecarWebSocketData>({
           runtime: "omp-sidecar",
           startedAt: startTime,
           compatibility: COMPATIBILITY,
+        });
+      }
+
+      // OpenChamber guest catalog compatibility. The OMP sidecar does not
+      // own OpenChamber guest packages, but the UI expects a successful empty
+      // catalog rather than a missing route.
+      if (path === "/api/guests" && req.method === "GET") {
+        return json({ guests: [] });
+      }
+
+      // OpenChamber's cross-project status seed is distinct from OpenCode's
+      // /session/status route below. Expose the host snapshot shape while
+      // preserving the existing OpenCode-compatible endpoint unchanged.
+      if (path === "/api/sessions/status" && req.method === "GET") {
+        await reconcileSessionStatuses();
+        const now = Date.now();
+        const sessions = Object.fromEntries(
+          Object.entries(getSessionStatusMap()).map(([sessionId, status]) => [sessionId, {
+            status: status.type,
+            lastUpdateAt: now,
+          }]),
+        );
+        return json({
+          sessions,
+          pending: getPendingBlockingRequestsSnapshot(),
+          serverTime: now,
         });
       }
 

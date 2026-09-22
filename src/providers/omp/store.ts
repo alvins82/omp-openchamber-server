@@ -27,10 +27,6 @@ function homePrefix(): string {
   return Bun.env.HOME! + "/";
 }
 
-const OMP_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const OMP_COMPACT_UUID_RE = /^[0-9a-f]{32}$/i;
-const OMP_SESSION_UUID_SUFFIX_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$/i;
-
 interface SessionHeader {
   id: string;
   cwd: string;
@@ -87,54 +83,52 @@ function isCanonicalOpenCodeSessionId(openCodeId: string): boolean {
   return /^ses_[0-9a-f]{32}$/i.test(openCodeId);
 }
 
-function normalizeOmpSessionUuid(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (OMP_UUID_RE.test(trimmed) || OMP_COMPACT_UUID_RE.test(trimmed)) return trimmed;
-  return undefined;
-}
+const OMP_UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}";
+const OMP_UUID_ONLY = new RegExp(`^(${OMP_UUID_PATTERN})$`, "i");
+const OMP_UUID_AT_END = new RegExp(`(${OMP_UUID_PATTERN})(?:\\.jsonl)?$`, "i");
 
-function extractSessionUuidFromJsonlPath(value: string): string | undefined {
-  const normalized = value.replace(/\\/g, "/");
-  const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
-  if (!/\.jsonl$/i.test(fileName)) return undefined;
-  return fileName.slice(0, -".jsonl".length).match(OMP_SESSION_UUID_SUFFIX_RE)?.[1];
-}
-
-function extractSessionUuidFromArtifactDirectory(value: string): string | undefined {
-  return value.match(OMP_SESSION_UUID_SUFFIX_RE)?.[1];
+function extractOmpUuid(value: string): string | undefined {
+  return value.match(OMP_UUID_AT_END)?.[1];
 }
 
 /**
- * Normalize the parent reference stored in an OMP child header.
- *
- * OMP currently persists the parent transcript path, while OpenCode exposes
- * the parent's canonical `ses_<32 hex>` id. The artifact directory is the
- * authoritative relationship because it is named after the parent session;
- * use it before the header value whenever it is available.
+ * Normalize a parent reference without treating an arbitrary transcript path
+ * as an OMP session id. OMP headers may store either an OpenCode id, a UUID,
+ * or the absolute path to the parent transcript.
  */
-export function normalizeParentSessionId(
-  parentSession?: string,
-  authoritativeParentUuid?: string,
-): string | undefined {
-  const authoritative = authoritativeParentUuid
-    ? normalizeOmpSessionUuid(authoritativeParentUuid)
-    : undefined;
-  if (authoritative) return toOpenCodeSessionId(authoritative);
+function normalizeSessionReference(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
 
-  if (!parentSession) return undefined;
-  const trimmed = parentSession.trim();
-  if (isCanonicalOpenCodeSessionId(trimmed)) return trimmed;
+  if (isCanonicalOpenCodeSessionId(trimmed)) {
+    return `ses_${trimmed.slice(4).toLowerCase()}`;
+  }
 
-  const directUuid = normalizeOmpSessionUuid(trimmed);
+  const directUuid = trimmed.match(OMP_UUID_ONLY)?.[1];
   if (directUuid) return toOpenCodeSessionId(directUuid);
 
-  const pathUuid = extractSessionUuidFromJsonlPath(trimmed);
+  const pathUuid = extractOmpUuid(trimmed);
   if (pathUuid) return toOpenCodeSessionId(pathUuid);
 
-  // Keep non-canonical OpenCode aliases intact for older OMP artifacts, but
-  // never pass an arbitrary filesystem path through as a session id.
-  if (/^ses_[^/\\]+$/i.test(trimmed)) return trimmed;
-  return undefined;
+  // Preserve the existing fallback for non-path OMP aliases, but never turn a
+  // malformed absolute transcript path into `ses_/some/path`.
+  if (trimmed.includes("/") || trimmed.includes("\\") || /\.jsonl$/i.test(trimmed)) {
+    return undefined;
+  }
+  return toOpenCodeSessionId(trimmed);
+}
+
+/**
+ * Resolve the parent id exposed by the OpenCode session contract. A child
+ * artifact directory is authoritative because OMP can write a transcript-path
+ * parentSession header that otherwise loses the parent's UUID.
+ */
+export function normalizeParentSessionId(
+  parentSession: string | undefined,
+  artifactParentReference?: string,
+): string | undefined {
+  return normalizeSessionReference(artifactParentReference) ?? normalizeSessionReference(parentSession);
 }
 
 /**
@@ -343,10 +337,10 @@ export async function readSessionHeader(
 async function buildOpenCodeSession(
   header: SessionHeader,
   filePath: string,
-  authoritativeParentUuid?: string,
+  artifactParentReference?: string,
 ): Promise<OpenCodeSession> {
   const openCodeId = toOpenCodeSessionId(header.id);
-  const parentID = normalizeParentSessionId(header.parentSession, authoritativeParentUuid);
+  const parentID = normalizeParentSessionId(header.parentSession, artifactParentReference);
   const compactId = header.id.replace(/-/g, "");
   const first8 = compactId.slice(0, 8);
   const created = Date.parse(header.timestamp) || Date.now();
@@ -609,7 +603,7 @@ export async function listOmpSessions(
         if (limit !== undefined && sessions.length >= limit) break;
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentOmpUuid = extractSessionUuidFromArtifactDirectory(ent.name);
+        const parentOmpUuid = extractOmpUuid(ent.name);
 
         let subFiles: string[];
         try {
@@ -702,7 +696,7 @@ export async function getOmpSessionByOpenCodeId(
         }
       } else if (ent.isDirectory()) {
         const subDirPath = join(dirPath, ent.name);
-        const parentOmpUuid = extractSessionUuidFromArtifactDirectory(ent.name);
+        const parentOmpUuid = extractOmpUuid(ent.name);
 
         let subFiles: string[];
         try {

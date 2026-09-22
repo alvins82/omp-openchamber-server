@@ -28,7 +28,14 @@ const FAKE_HOME = mkdtempSync(join(tmpdir(), "oc-integ-"));
 const DIR_A = join(FAKE_HOME, "proj");
 const DIR_B = join(FAKE_HOME, "elsewhere");
 const SPAWN_LOG = join(FAKE_HOME, "spawn.log");
-const FILE_A = join(FAKE_HOME, ".omp", "agent", "sessions", "-proj", "a.jsonl");
+const FILE_A = join(
+  FAKE_HOME,
+  ".omp",
+  "agent",
+  "sessions",
+  "-proj",
+  `2026-08-22T00-00-00-000Z_${UUID_A}.jsonl`,
+);
 const FILE_B = join(FAKE_HOME, ".omp", "agent", "sessions", "-elsewhere", "b.jsonl");
 
 function spawnLogLines(): number {
@@ -304,6 +311,48 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
 
     const nonMatch = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A) + "&search=Nomatch123xyz")).json();
     expect(nonMatch).toHaveLength(0);
+  });
+
+  test("GET /session/:id/children groups artifact children whose parent header is a path", async () => {
+    const artifactDir = FILE_A.replace(/\.jsonl$/, "");
+    const childUuids = [
+      "019ef37d-f6e3-7006-88ad-5025bade750d",
+      "019ef37d-f6e3-7006-88ad-5025bade750e",
+      "019ef37d-f6e3-7006-88ad-5025bade750f",
+    ];
+    mkdirSync(artifactDir, { recursive: true });
+
+    try {
+      for (const [index, childUuid] of childUuids.entries()) {
+        writeFileSync(
+          join(artifactDir, `worker-${index + 1}.jsonl`),
+          JSON.stringify({
+            type: "session",
+            id: childUuid,
+            cwd: DIR_A,
+            timestamp: "2026-08-22T00:00:00Z",
+            version: 3,
+            title: `Worker ${index + 1}`,
+            parentSession: FILE_A,
+            agent: "task",
+          }) + "\n",
+        );
+      }
+
+      const listed = await (await fetch(BASE + "session?directory=" + encodeURIComponent(DIR_A))).json();
+      const childIds = childUuids.map((uuid) => "ses_" + uuid.replace(/-/g, ""));
+      const listedChildren = listed.filter((session: { id: string }) => childIds.includes(session.id));
+      expect(listedChildren).toHaveLength(3);
+      expect(listedChildren.every((session: { parentID?: string }) => session.parentID === SES_A)).toBe(true);
+
+      const response = await fetch(BASE + "session/" + SES_A + "/children");
+      expect(response.status).toBe(200);
+      const children = await response.json();
+      expect(children.map((session: { id: string }) => session.id).sort()).toEqual(childIds.sort());
+      expect(children.every((session: { parentID?: string }) => session.parentID === SES_A)).toBe(true);
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+    }
   });
 
   test("GET /experimental/session?roots=true lists every project; limit and search bound it", async () => {
@@ -782,6 +831,20 @@ describe("sidecar HTTP contract (Tier B, mock OMP)", () => {
     expect(await (await fetch(BASE + "session/status")).json()).toEqual({});
     expect(spawnLogLines()).toBe(before);
   });
+
+  test("OpenChamber compatibility snapshots answer guest and global status probes", async () => {
+    const guests = await fetch(BASE + "api/guests");
+    expect(guests.status).toBe(200);
+    expect(await guests.json()).toEqual({ guests: [] });
+
+    const status = await fetch(BASE + "api/sessions/status");
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({
+      sessions: {},
+      pending: {},
+      serverTime: expect.any(Number),
+    });
+  });
 });
 
 function eventsFor(events: SSEEvent[], type: string, ses: string) {
@@ -899,6 +962,14 @@ await new Promise((r) => setTimeout(r, 60));
 
     const busyMap = await (await fetch(BASE + "session/status")).json();
     expect(busyMap[SES_A]).toEqual({ type: "busy" });
+
+    const hostStatus = await (await fetch(BASE + "api/sessions/status")).json();
+    expect(hostStatus.sessions[SES_A]).toMatchObject({
+      status: "busy",
+      lastUpdateAt: expect.any(Number),
+    });
+    expect(hostStatus.pending).toEqual({});
+    expect(hostStatus.serverTime).toEqual(expect.any(Number));
 
     await stream;
     expect(await (await fetch(BASE + "session/status")).json()).toEqual({});

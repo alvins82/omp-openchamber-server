@@ -4,6 +4,7 @@ import {
   addPendingQuestion,
   listPendingPermissions,
   listPendingQuestions,
+  getPendingBlockingRequestsSnapshot,
   getPendingPermission,
   getPendingQuestion,
   replyPermission,
@@ -137,6 +138,32 @@ describe("Approval & Question Bridge (Tier 1)", () => {
       expect(ok).toBe(true);
       expect(resolvedPayload).toEqual({ value: "Claude" });
       expect(listPendingQuestions()).toHaveLength(0);
+    });
+
+    it("groups pending permissions and questions by session for the host snapshot", () => {
+      const permission: PermissionRequest = {
+        id: "perm_snapshot",
+        sessionID: "ses_snapshot",
+        permission: "execute",
+        patterns: [],
+        metadata: {},
+        always: [],
+      };
+      const question: QuestionRequest = {
+        id: "question_snapshot",
+        sessionID: "ses_snapshot",
+        questions: [],
+      };
+
+      addPendingPermission(permission, () => {});
+      addPendingQuestion(question, () => {});
+
+      expect(getPendingBlockingRequestsSnapshot()).toEqual({
+        ses_snapshot: {
+          permissions: [permission],
+          questions: [question],
+        },
+      });
     });
 
     it("handles reject question -> cancelled true", () => {
