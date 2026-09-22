@@ -49,7 +49,6 @@ import { homedir } from "node:os";
 import { readdir, mkdir, stat, unlink, rename } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import readline from "node:readline";
 import { fakeBackend } from "./providers/fake/backend";
 import { describeSmallModel, generateSmallModelText, resolveSmallModel, resolveProviderConnection, ensureLegacyOmpConfigMigrated } from "./adapters/openchamber/small-model";
 import { handleGitRequest } from "./adapters/openchamber/git";
@@ -2258,7 +2257,8 @@ function handleShutdownSignal(signal: string) {
   process.exit(0);
 }
 
-// Restore terminal raw mode on process exit to avoid leaving user shell in corrupted state
+// Leave the terminal in normal line mode on process exit in case shutdown began
+// while another code path had changed its mode.
 process.on("exit", () => {
   try {
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
@@ -2276,24 +2276,15 @@ process.on("SIGHUP", () => handleShutdownSignal("SIGHUP"));
 process.on("SIGQUIT", () => handleShutdownSignal("SIGQUIT"));
 process.on("SIGBREAK", () => handleShutdownSignal("SIGBREAK"));
 
-// Interactive terminal keypress detection for instant Ctrl+C, Ctrl+Z, Ctrl+D, Ctrl+\ termination
+// Keep stdin in normal terminal mode so input is echoed and Enter advances the
+// console. The terminal turns Ctrl+C, Ctrl+Z, and Ctrl+\ into signals handled
+// above; the byte checks also cover control characters from non-TTY stdin.
 try {
-  if (process.stdin.isTTY) {
-    readline.emitKeypressEvents(process.stdin);
-    if (typeof process.stdin.setRawMode === "function") {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.on("keypress", (_str, key) => {
-      if (key && key.ctrl && (key.name === "c" || key.name === "d")) {
-        handleShutdownSignal("SIGINT");
-      } else if (key && key.ctrl && key.name === "z") {
-        handleShutdownSignal("SIGTSTP");
-      } else if (key && key.ctrl && key.name === "\\") {
-        handleShutdownSignal("SIGQUIT");
-      }
-    });
-  }
   process.stdin.resume();
+  if (process.stdin.isTTY) {
+    // In normal terminal mode Ctrl+D is delivered as EOF instead of a byte.
+    process.stdin.on("end", () => handleShutdownSignal("EOF"));
+  }
   process.stdin.on("data", (chunk) => {
     const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     if (s.includes("\u0003") || s.includes("\u0004")) {
