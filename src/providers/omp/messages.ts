@@ -1,9 +1,12 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { MissingWorkingDirectoryError, withOmpRpc } from "./rpc";
-import { getOmpSessionByOpenCodeId } from "./store";
+import { createOmpSession, deleteOmpSession, getOmpSessionByOpenCodeId } from "./store";
 import { sessionLogger } from "../../shared/logger";
 import {
   bindPersistedOmpMessageId,
+  deletePersistedMessageIdsFrom,
   listPersistedMessageIds,
   recordPersistedMessageId,
 } from "./title-db";
@@ -303,6 +306,184 @@ function cacheKey(openCodeId: string, cwd: string): string {
 
 export function invalidateMessageCache(openCodeId: string, cwd: string): void {
   messageCache.delete(cacheKey(openCodeId, cwd));
+}
+
+function timestampFromJsonlEntry(entry: Record<string, unknown>, message?: Record<string, unknown>): number | undefined {
+  const numeric = typeof message?.timestamp === "number"
+    ? message.timestamp
+    : typeof entry.timestamp === "number" ? entry.timestamp : undefined;
+  if (numeric !== undefined && Number.isFinite(numeric)) return numeric;
+  const raw = typeof message?.timestamp === "string"
+    ? message.timestamp
+    : typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+  if (!raw) return undefined;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function findRawMessageBoundary(
+  lines: string[],
+  target: OpenCodeMessageRecord,
+  messageId: string,
+  persisted: ReturnType<typeof listPersistedMessageIds>,
+): number {
+  const mapping = persisted.find((item) => item.clientMessageId === messageId);
+  const rawIds = new Set([messageId, mapping?.ompMessageId].filter((value): value is string => !!value));
+  const targetTime = target.info.time.created;
+  let firstAfterTime = -1;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]?.trim();
+    if (!line) continue;
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (entry.type !== "message") continue;
+    const rawMessage = entry.message && typeof entry.message === "object"
+      ? entry.message as Record<string, unknown>
+      : entry;
+    const rawId = typeof rawMessage.id === "string"
+      ? rawMessage.id
+      : typeof entry.id === "string" ? entry.id : undefined;
+    if (rawId && rawIds.has(rawId)) return index;
+    const timestamp = timestampFromJsonlEntry(entry, rawMessage);
+    if (timestamp !== undefined && timestamp >= targetTime && firstAfterTime === -1) firstAfterTime = index;
+    if (timestamp === targetTime && rawMessage.role === target.info.role) return index;
+  }
+
+  return firstAfterTime;
+}
+
+/**
+ * Commit a staged revert by removing its boundary message and everything after
+ * it from OMP's append-only transcript. The target id exposed to OpenCode may
+ * be the optimistic client id, so resolve it through the persisted message map
+ * before falling back to its timestamp and role.
+ */
+export async function truncateOmpSessionAtMessage(
+  openCodeId: string,
+  cwd: string,
+  messageId: string,
+): Promise<boolean> {
+  const session = await getOmpSessionByOpenCodeId(openCodeId, cwd);
+  if (!session) return false;
+
+  const transcript = await loadSessionMessages(openCodeId, cwd);
+  const target = transcript.find((message) => message.info.id === messageId);
+  if (!target) return false;
+
+  let original: string;
+  try {
+    original = await readFile(session.path, "utf8");
+  } catch {
+    return false;
+  }
+
+  const lines = original.split("\n");
+  const targetTime = target.info.time.created;
+  const boundary = findRawMessageBoundary(lines, target, messageId, listPersistedMessageIds(openCodeId));
+  if (boundary === -1) return false;
+
+  // Preserve all prior records (including the OMP session header and title
+  // slot), then append a durable clear marker for any staged revert.
+  const retained = lines.slice(0, boundary).filter((line) => line.length > 0);
+  retained.push(JSON.stringify({ type: "revert_change", timestamp: new Date().toISOString(), revert: null }));
+  const tempPath = join(dirname(session.path), `.${randomUUID()}.revert.tmp`);
+  try {
+    await writeFile(tempPath, `${retained.join("\n")}\n`, "utf8");
+    await rename(tempPath, session.path);
+  } catch {
+    await unlink(tempPath).catch(() => {});
+    return false;
+  }
+
+  invalidateMessageCache(openCodeId, session.directory);
+  const recorded = recordedUserMessagesBySession.get(openCodeId);
+  if (recorded) {
+    recordedUserMessagesBySession.set(openCodeId, recorded.filter((item) => item.timestamp < targetTime));
+  }
+  deletePersistedMessageIdsFrom(openCodeId, targetTime);
+  return true;
+}
+
+/** Create a fork with copied OMP transcript records, honoring v2's `before` id. */
+export async function forkOmpSession(
+  openCodeId: string,
+  cwd: string,
+  before?: string,
+): Promise<OpenCodeSession | null> {
+  const parent = await getOmpSessionByOpenCodeId(openCodeId, cwd);
+  if (!parent) return null;
+
+  let sourceText: string;
+  try {
+    sourceText = await readFile(parent.path, "utf8");
+  } catch {
+    return null;
+  }
+  const sourceLines = sourceText.split("\n");
+  const sourceHeaderIndex = sourceLines.findIndex((line) => {
+    try {
+      return (JSON.parse(line) as Record<string, unknown>).type === "session";
+    } catch {
+      return false;
+    }
+  });
+  if (sourceHeaderIndex === -1) return null;
+
+  let boundary = sourceLines.length;
+  if (before) {
+    const transcript = await loadSessionMessages(openCodeId, cwd);
+    const target = transcript.find((message) => message.info.id === before);
+    if (!target) return null;
+    boundary = findRawMessageBoundary(sourceLines, target, before, listPersistedMessageIds(openCodeId));
+    if (boundary === -1) return null;
+  }
+
+  const copiedRecords = sourceLines.slice(sourceHeaderIndex + 1, boundary).filter((line) => {
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      return entry.type === "message" || entry.type === "compaction";
+    } catch {
+      return false;
+    }
+  });
+
+  const child = await createOmpSession(parent.directory, {
+    parentID: parent.id,
+    title: `Fork of ${parent.title ?? parent.id}`,
+    agent: parent.agent,
+    model: parent.model,
+    metadata: parent.metadata,
+  });
+  try {
+    const childLines = (await readFile(child.path, "utf8")).split("\n");
+    const childHeaderIndex = childLines.findIndex((line) => {
+      try {
+        return (JSON.parse(line) as Record<string, unknown>).type === "session";
+      } catch {
+        return false;
+      }
+    });
+    if (childHeaderIndex === -1) throw new Error("fork session header not found");
+    const contents = [...childLines.slice(0, childHeaderIndex + 1), ...copiedRecords].join("\n") + "\n";
+    const tempPath = join(dirname(child.path), `.${randomUUID()}.fork.tmp`);
+    try {
+      await writeFile(tempPath, contents, "utf8");
+      await rename(tempPath, child.path);
+    } catch (error) {
+      await unlink(tempPath).catch(() => {});
+      throw error;
+    }
+    invalidateMessageCache(child.id, child.directory);
+    return await getOmpSessionByOpenCodeId(child.id, child.directory);
+  } catch {
+    await deleteOmpSession(child.id, child.directory);
+    return null;
+  }
 }
 
 function openCodeRoleFor(msg: AgentMessage): "user" | "assistant" | null {

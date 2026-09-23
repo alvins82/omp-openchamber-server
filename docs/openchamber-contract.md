@@ -1,146 +1,73 @@
-# OpenChamber Client Contract
+# OpenChamber OpenCode v2 Contract
 
-This document specifies the OpenCode HTTP/SSE API contract expected by OpenChamber (version 1.20.0+), including wire shapes, event pipelines, and reducer expectations.
+This note records the OpenCode API and event shapes used by OpenChamber's
+`@opencode/client` 2.0.14 dependency. The sidecar keeps OMP's session files and
+turn execution behind an adapter and exposes these v2 wire shapes at its HTTP,
+SSE, and WebSocket boundaries.
 
----
+## HTTP
 
-## 1. Network Topology & Routing
+OpenChamber normally calls `/api/...`; its web proxy strips `/api` before
+forwarding to the sidecar. Directory-scoped requests use the
+`x-opencode-directory` header, which the sidecar also accepts through its
+legacy directory query parameter.
 
-OpenChamber connects to the server either directly or via its internal web proxy:
+Responses follow the v2 operation schemas:
 
-```
-UI Client ──(HTTP/SSE with /api prefix)──▶ Web Server Proxy ──(Prefix Stripped)──▶ omp-openchamber-server
-```
+- Single resources and mutations with a result use `{ data: ... }` where the
+  generated operation declares a data envelope. The SDK unwraps this field.
+- Session and message pages use `{ data: [...], cursor: { previous?, next? } }`.
+- Project lists are arrays. `/config` returns config-entry arrays, and
+  `/location` returns the location object directly.
+- Mutations declared as `void` return HTTP 204.
 
-- **Prefix Stripping**: The web server proxy forwards `/api/session/...` to `/session/...`.
-- **Directory Scoping**: Requests carry a `?directory=<absolute-path>` query parameter to identify the workspace.
+Session resources include `projectID`, `cost`, `tokens`, `time`, and
+`location: { directory }`. Message history is a flat union of v2 messages,
+not the older `{ info, parts }` record. Important discriminators include
+`type: "user" | "assistant" | "synthetic" | "compaction" | "shell"`.
+Assistant content is an ordered array of text, reasoning, and tool items.
 
----
+Prompts use top-level fields such as `id`, `text`, `files`, `agents`, `skills`,
+`metadata`, and `delivery`. File inputs use `{ uri, name?, description?,
+mention? }`; the sidecar converts them to the v2 file-attachment shape for
+messages and inbox events. Synthetic context is queued for the next prompt.
+Prompt and command calls return the accepted inbox user item.
 
-## 2. Server-Sent Events (SSE) Contract
+The sidecar supports staged transcript reverts and session forks at a `before`
+message boundary. OMP does not keep OpenCode's per-turn filesystem snapshots,
+so `session.diff` reports the current tracked workspace diff rather than a
+historical diff for a selected turn.
 
-OpenChamber processes SSE streams through its client `resolveEventPayload` gate.
+## Events
 
-### Frame Encoding
-Frames must be `data:`-only JSON envelopes:
-```text
-data: {"payload":{"id":"<eventId>","type":"<eventType>","properties":{...}}}
-```
-Or top-level typed objects:
-```text
-data: {"type":"<eventType>","properties":{...}}
-```
+OpenChamber consumes OpenCode v2 event envelopes:
 
-### Event Lifecycle
-
-1. **Connection**: The stream begins with a `server.connected` event:
-   ```json
-   { "type": "server.connected", "properties": {} }
-   ```
-2. **Heartbeat**: To prevent stream timeouts without dropping connections, the server emits periodic heartbeat events:
-   ```json
-   { "type": "server.heartbeat", "properties": {} }
-   ```
-3. **Turn Streaming**:
-   - `session.status` (`busy`): Signals the session is processing.
-   - `message.updated`: Creates the assistant message shell.
-   - `message.part.updated`: Initializes a content part (text, reasoning, tool).
-   - `message.part.delta`: Emits incremental streaming tokens.
-   - `message.part.updated`: Finalizes the part with full content and completion timestamps.
-   - `message.updated`: Finalizes the message (`finish: "stop"`).
-   - `session.status` (`idle`): Signals turn completion and releases UI locks.
-
-Provider and transport failures use a terminal `message.updated` with
-`finish: "error"` and `info.error`, followed by `session.error` and
-`session.idle`. If OMP sends both a terminal event and a failed RPC
-acknowledgement, the terminal event wins and the sidecar emits no second
-assistant completion.
-
-Subagent failures follow the same terminal event contract. A child reported as
-failed emits `session.error` with the provider message, then an idle status so
-the child leaves the active set without being mistaken for a successful
-completion. Completed children continue to emit idle status only.
-
----
-
-## 3. Message & Part Data Structures
-
-### Message Envelope
-Messages are represented as `{info, parts}` objects:
-```typescript
-interface MessageRecord {
-  info: {
-    id: string;             // msg_<sessionID>_<seq>
-    role: "user" | "assistant";
-    sessionID: string;      // ses_<32hex>
-    parentID?: string;      // Preceding message ID
-    finish?: "stop" | "error";
-    agent: "omp";
-    model: {
-      providerID: string;
-      modelID: string;
-      variant?: string;
-    };
-    time: {
-      created: number;
-      completed?: number;
-    };
-    metadata?: {
-      omp?: {
-        // Aggregates the raw model requests collated into this assistant record.
-        turnUsage?: TokenBreakdown;
-        modelDurationMs?: number;
-        ttftMs?: number;
-        ttftSamples?: number;
-      };
-    };
-  };
-  parts: MessagePart[];
+```json
+{
+  "id": "evt_123",
+  "created": 1780000000000,
+  "type": "session.text.delta",
+  "durable": { "aggregateID": "ses_...", "seq": 1, "version": 1 },
+  "location": { "directory": "/workspace" },
+  "data": { "sessionID": "ses_...", "assistantMessageID": "msg_...", "ordinal": 0, "delta": "Hi" }
 }
 ```
 
-### Supported Part Types
+SSE sends the envelope as a `data:` JSON frame. The global event WebSocket
+sends a `ready` frame followed by `event` frames whose `payload` is the same
+envelope. Directory location and durable sequence fields are included when
+the event schema defines them.
 
-1. **Text Part (`type: "text"`)**:
-   ```json
-   {
-     "id": "part_ses_123_0_0",
-     "sessionID": "ses_123",
-     "messageID": "msg_123_0",
-     "type": "text",
-     "text": "Generated response content"
-   }
-   ```
+Turn events use `session.execution.started`, assistant step lifecycle events,
+text/reasoning deltas, tool lifecycle events, and then
+`session.execution.succeeded`, `.failed`, or `.interrupted`. User prompts are
+reported as `session.inbox.enqueued`; shell calls emit
+`session.shell.started` and `.ended`; title changes use `session.renamed`.
+The sidecar translates its existing OMP events into this v2 vocabulary.
 
-   User text parts may also include `"synthetic": true`. Keep synthetic parts
-   separate and preserve the flag. OpenChamber uses it to hide context-only
-   reminders, such as the goal-mode reminder, from the visible transcript.
+## Local source of truth
 
-2. **Reasoning Part (`type: "reasoning"`)**:
-   ```json
-   {
-     "id": "part_ses_123_0_1",
-     "sessionID": "ses_123",
-     "messageID": "msg_123_0",
-     "type": "reasoning",
-     "text": "Internal reasoning tokens"
-   }
-   ```
-
-3. **Tool Invocation Part (`type: "tool"`)**:
-   ```json
-   {
-     "id": "part_ses_123_0_2",
-     "sessionID": "ses_123",
-     "messageID": "msg_123_0",
-     "type": "tool",
-     "callID": "call_abc123",
-     "tool": "read",
-     "state": {
-       "status": "completed",
-     "input": { "path": "src/server.ts" },
-       "output": "file content...",
-       "time": { "start": 1756000000000, "end": 1756000001000 }
-     }
-   }
-   ```
+The v2 shapes above were checked against the `@opencode/client` package in the
+OpenChamber source checkout. When OpenChamber updates that dependency, review
+the generated types and the API methods in
+`packages/ui/src/lib/opencode/client.ts` before changing this adapter.

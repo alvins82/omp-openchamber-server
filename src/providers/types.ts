@@ -187,6 +187,7 @@ export interface OpenCodeSession {
   model: SessionModelRef;
   version: string;
   time: { created: number; updated: number; archived?: number };
+  revert?: { messageID: string; partID?: string; snapshot?: string; files?: unknown[] };
   cost: number;
   tokens: {
     input: number;
@@ -377,6 +378,9 @@ export interface BackendTurnConnection {
 export interface SessionUpdateInput {
   title?: string;
   metadata?: Record<string, unknown>;
+  agent?: string;
+  model?: ModelRef;
+  revert?: { messageID: string; partID?: string; snapshot?: string; files?: unknown[] } | null;
   time?: { created?: number; updated?: number; archived?: number | null };
 }
 
@@ -384,7 +388,7 @@ export interface SessionUpdateInput {
 export interface SessionStore {
   create(
     directory: string | null | undefined,
-    init?: { title?: string; parentID?: string },
+    init?: { id?: string; title?: string; parentID?: string; agent?: string; model?: ModelRef; metadata?: Record<string, unknown> },
   ): Promise<OpenCodeSession>;
   get(openCodeId: string, directory?: string | null): Promise<OpenCodeSession | null>;
   list(
@@ -397,6 +401,11 @@ export interface SessionStore {
     updates: SessionUpdateInput,
     directory?: string | null,
   ): Promise<OpenCodeSession | null>;
+  /** Commit a staged revert by removing the boundary message and its tail. */
+  commitRevert(openCodeId: string, messageID: string, directory?: string | null): Promise<boolean>;
+  /** Create a child session, optionally excluding the transcript from `before` onward. */
+  fork(openCodeId: string, directory: string, before?: string): Promise<OpenCodeSession | null>;
+  move(openCodeId: string, directory: string, sourceDirectory?: string | null): Promise<OpenCodeSession | null>;
   setTitle(openCodeId: string, title: string, source: "auto" | "user", cwd: string): Promise<void>;
   children(parentOpenCodeId: string, directory?: string | null): Promise<OpenCodeSession[]>;
   transcript(openCodeId: string, cwd: string): Promise<OpenCodeMessageRecord[] | null>;
