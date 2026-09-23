@@ -27,13 +27,14 @@ import {
   type OmpRpcTransport,
 } from "./rpc";
 import { createOmpEventNormalizer, OMP_DEFAULT_MODEL } from "./events";
-import { invalidateMessageCache, loadSessionMessages, recordUserMessageId } from "./messages";
+import { forkOmpSession, invalidateMessageCache, loadSessionMessages, recordUserMessageId, truncateOmpSessionAtMessage } from "./messages";
 import {
   createOmpSession,
   deleteOmpSession,
   getOmpSessionByOpenCodeId,
   listOmpChildSessions,
   listOmpSessions,
+  moveOmpSession,
   resolveOmpSubagentOpenCodeId,
   setOmpSessionTitle,
   updateOmpSession,
@@ -202,12 +203,27 @@ const ompStore: SessionStore = {
       {
         title: updates.title,
         metadata: updates.metadata,
+        agent: updates.agent,
+        model: updates.model,
+        revert: updates.revert,
         time: updates.time?.archived !== undefined
           ? { archived: updates.time.archived }
           : undefined,
       },
       directory,
     );
+  },
+  async commitRevert(openCodeId, messageID, directory) {
+    return truncateOmpSessionAtMessage(openCodeId, directory ?? "", messageID);
+  },
+  async fork(openCodeId, directory, before) {
+    return forkOmpSession(openCodeId, directory, before);
+  },
+  async move(openCodeId, directory, sourceDirectory) {
+    if (sourceDirectory) invalidateMessageCache(openCodeId, sourceDirectory);
+    const moved = await moveOmpSession(openCodeId, directory, sourceDirectory);
+    if (moved) invalidateMessageCache(openCodeId, moved.directory);
+    return moved;
   },
   async setTitle(openCodeId, title, source, cwd) {
     await setOmpSessionTitle(openCodeId, title, source, cwd);

@@ -34,7 +34,9 @@ import {
   emitFormSettled,
   emitSessionCompactionStarted,
   emitSessionCompacted,
+  emitOpenCodeV2Event,
 } from "../../shared/sse";
+import { toV2FileAttachment } from "./v2";
 import {
   addPendingPermission,
   addPendingQuestion,
@@ -58,12 +60,26 @@ interface OpenCodeTextPart {
 
 type OpenCodePart = OpenCodeTextPart | { type: "file" | "image" | string; [key: string]: unknown } | Record<string, unknown>;
 
-type PromptDelivery = "steer";
+type PromptDelivery = "steer" | "queue";
+
+interface PromptFile {
+  uri: string;
+  name?: string;
+  description?: string;
+  mention?: { start: number; end: number; text: string };
+}
 
 interface PromptBody {
   parts?: OpenCodePart[];
   messageID?: string;
-  delivery?: PromptDelivery;
+  id?: string | null;
+  text?: string;
+  files?: PromptFile[];
+  agents?: Array<{ name: string; mention?: { start: number; end: number; text: string } }>;
+  skills?: Array<{ id: string; mention?: { start: number; end: number; text: string } }>;
+  metadata?: Record<string, unknown>;
+  resume?: boolean;
+  delivery?: PromptDelivery | null;
   model?: { providerID?: string; modelID?: string };
   variant?: string;
   credentials?: BackendCredentialInput["credentials"];
@@ -88,6 +104,7 @@ function sessionKey(openCodeId: string, cwd: string): string {
 
 const sessionStates = new Map<string, SessionState>();
 const sessionBusyLocks = new Set<string>();
+const syntheticContext = new Map<string, Array<{ text: string; description?: string; metadata?: Record<string, unknown> }>>();
 
 interface SubagentStatusScope {
   key: string;
@@ -111,6 +128,7 @@ function clearSubagentStatuses(scopeKey: string): void {
 export function removeSessionState(openCodeId: string, cwd: string): void {
   clearSessionApprovals(openCodeId);
   const key = sessionKey(openCodeId, cwd);
+  syntheticContext.delete(key);
   clearSubagentStatuses(key);
   const state = sessionStates.get(key);
   if (state) {
@@ -122,6 +140,32 @@ export function removeSessionState(openCodeId: string, cwd: string): void {
     }
     sessionStates.delete(key);
   }
+}
+
+/** Store v2 synthetic context until the following user prompt is dispatched. */
+export function addSessionSyntheticContext(
+  openCodeId: string,
+  cwd: string,
+  input: { id?: string; text: string; description?: string; metadata?: Record<string, unknown> },
+): { id: string; sessionID: string; time: { created: number }; type: "synthetic"; payload: { text: string; description?: string; metadata?: Record<string, unknown> }; delivery: "queue" } {
+  const id = input.id || makeMessageId(openCodeId);
+  const entry = { text: input.text, description: input.description, metadata: input.metadata };
+  const key = sessionKey(openCodeId, cwd);
+  syntheticContext.set(key, [...(syntheticContext.get(key) ?? []), entry]);
+  emitOpenCodeV2Event("session.synthetic", {
+    sessionID: openCodeId,
+    text: input.text,
+    description: input.description,
+    metadata: input.metadata,
+  }, cwd, id.startsWith("msg_") ? `evt_${id.slice(4)}` : undefined);
+  return {
+    id,
+    sessionID: openCodeId,
+    time: { created: Date.now() },
+    type: "synthetic",
+    payload: { text: input.text, description: input.description, metadata: input.metadata },
+    delivery: "queue",
+  };
 }
 
 
@@ -141,7 +185,15 @@ function isPromptBody(value: unknown): value is PromptBody {
   if (value == null || typeof value !== "object") return false;
   if ("parts" in value && !Array.isArray(value.parts)) return false;
   if ("messageID" in value && typeof value.messageID !== "string") return false;
-  if ("delivery" in value && value.delivery !== "steer") return false;
+  if ("id" in value && value.id !== null && typeof value.id !== "string") return false;
+  if ("text" in value && typeof value.text !== "string") return false;
+  if ("files" in value && (!Array.isArray(value.files) || value.files.some((file) =>
+    !file || typeof file !== "object" || typeof (file as Record<string, unknown>).uri !== "string"))) return false;
+  if ("agents" in value && (!Array.isArray(value.agents) || value.agents.some((agent) =>
+    !agent || typeof agent !== "object" || typeof (agent as Record<string, unknown>).name !== "string"))) return false;
+  if ("skills" in value && (!Array.isArray(value.skills) || value.skills.some((skill) =>
+    !skill || typeof skill !== "object" || typeof (skill as Record<string, unknown>).id !== "string"))) return false;
+  if ("delivery" in value && value.delivery !== null && value.delivery !== "steer" && value.delivery !== "queue") return false;
   if ("model" in value && value.model !== null && typeof value.model === "object") {
     const model = value.model as Record<string, unknown>;
     if ("providerID" in model && typeof model.providerID !== "string") return false;
@@ -247,10 +299,18 @@ async function resolveImageFromUrl(
 }
 
 export async function extractPromptImages(body: PromptBody, cwd?: string): Promise<ImageContent[]> {
-  if (!Array.isArray(body.parts)) return [];
   const images: ImageContent[] = [];
 
-  for (const part of body.parts) {
+  const parts: OpenCodePart[] = [
+    ...(Array.isArray(body.parts) ? body.parts : []),
+    ...(body.files ?? []).map((file) => ({
+      type: "file" as const,
+      url: file.uri,
+      filename: file.name,
+      mime: mimeFromPath(file.name ?? file.uri),
+    })),
+  ];
+  for (const part of parts) {
     if (!part || typeof part !== "object") continue;
     const p = part as Record<string, unknown>;
     const type = p.type;
@@ -326,9 +386,9 @@ export async function extractPromptImages(body: PromptBody, cwd?: string): Promi
 }
 
 function extractPromptTextParts(body: PromptBody): OpenCodePromptTextPart[] {
-  if (!Array.isArray(body.parts)) return [];
   const parts: OpenCodePromptTextPart[] = [];
-  for (const part of body.parts) {
+  if (typeof body.text === "string" && body.text.length > 0) parts.push({ text: body.text });
+  for (const part of body.parts ?? []) {
     if (isTextPart(part) && part.text) {
       parts.push({
         text: part.text,
@@ -337,6 +397,65 @@ function extractPromptTextParts(body: PromptBody): OpenCodePromptTextPart[] {
     }
   }
   return parts;
+}
+
+async function extractPromptFileText(body: PromptBody, cwd: string): Promise<string[]> {
+  const files = [
+    ...(body.files ?? []).map((file) => ({ uri: file.uri, name: file.name })),
+    ...(body.parts ?? []).flatMap((part) => {
+      if (!part || typeof part !== "object" || !((part as Record<string, unknown>).type === "file")) return [];
+      const value = part as Record<string, unknown>;
+      const uri = typeof value.url === "string" ? value.url : "";
+      return uri ? [{ uri, name: typeof value.filename === "string" ? value.filename : undefined }] : [];
+    }),
+  ];
+  const textExtensions = new Set([
+    ".c", ".cc", ".cpp", ".css", ".csv", ".go", ".h", ".hpp", ".html", ".ini", ".java", ".js", ".json",
+    ".jsx", ".md", ".mdx", ".mjs", ".py", ".rb", ".rs", ".sh", ".sql", ".svg", ".toml", ".ts", ".tsx",
+    ".txt", ".xml", ".yaml", ".yml",
+  ]);
+  const contexts: string[] = [];
+  for (const file of files) {
+    if (!file.uri || isBlobRef(file.uri)) continue;
+    let filePath = file.uri;
+    const label = file.name || file.uri;
+    if (filePath.startsWith("data:")) {
+      const match = filePath.match(/^data:([^;,]+)?(?:;base64)?,(.*)$/s);
+      const isBase64 = /^data:[^,]*;base64,/i.test(filePath);
+      if (!match) continue;
+      const extensionSource = file.name ?? "";
+      if (!textExtensions.has(extensionSource.slice(extensionSource.lastIndexOf(".")).toLowerCase())) continue;
+      try {
+        const content = isBase64
+          ? Buffer.from(match[2] ?? "", "base64").toString("utf8")
+          : decodeURIComponent(match[2] ?? "");
+        if (content.length <= 2 * 1024 * 1024 && !content.includes("\0")) {
+          contexts.push(`Attached file: ${label}\n\n${content}`);
+        }
+      } catch {
+        /* malformed inline text attachment */
+      }
+      continue;
+    }
+    try {
+      if (filePath.startsWith("file://")) filePath = new URL(filePath).pathname;
+      if (!isAbsolute(filePath)) filePath = resolve(cwd, filePath);
+      const extensionSource = file.name || filePath;
+      if (!textExtensions.has(extensionSource.slice(extensionSource.lastIndexOf(".")).toLowerCase())) {
+        contexts.push(`Attached file: ${label} (available at ${filePath})`);
+        continue;
+      }
+      const buffer = await readFile(filePath);
+      if (buffer.length > 2 * 1024 * 1024 || buffer.includes(0)) {
+        contexts.push(`Attached file: ${label} (available at ${filePath})`);
+        continue;
+      }
+      contexts.push(`Attached file: ${label}\n\n${buffer.toString("utf8")}`);
+    } catch {
+      contexts.push(`Attached file: ${label} (available at ${filePath})`);
+    }
+  }
+  return contexts;
 }
 
 function makeMessageId(openCodeId: string, suffix?: string): string {
@@ -452,6 +571,41 @@ function recordAndEmitUserPrompt(
     promptTextParts,
   );
   const userMsgTime = Date.now() - 1;
+  const filePayload = [
+    ...(body.files ?? []).map((file) => toV2FileAttachment({
+      ...file,
+      mime: mimeFromPath(file.name ?? file.uri) ?? undefined,
+    })),
+    ...(body.parts ?? []).flatMap((part) => {
+      if (!part || typeof part !== "object" || !("type" in part) || (part.type !== "file" && part.type !== "image")) return [];
+      const value = part as Record<string, unknown>;
+      const mime = (typeof value.mime === "string" ? value.mime : undefined) ??
+        (typeof value.mimeType === "string" ? value.mimeType : undefined) ?? "application/octet-stream";
+      const uri = typeof value.url === "string" ? value.url : undefined;
+      const inline = typeof value.data === "string" ? value.data : undefined;
+      const source = uri ?? (inline ? `data:${mime};base64,${inline.replace(/^data:[^,]*,/, "")}` : "");
+      return source ? [toV2FileAttachment({
+        uri: source,
+        mime,
+        ...(typeof value.filename === "string" ? { name: value.filename } : {}),
+      })] : [];
+    }),
+  ];
+  emitOpenCodeV2Event("session.inbox.enqueued", {
+    sessionID: openCodeId,
+    inboxID: parentMessageID,
+    item: {
+      type: "user",
+      delivery: body.delivery ?? "queue",
+      payload: {
+        text: promptText,
+        files: filePayload,
+        ...(body.agents ? { agents: body.agents } : {}),
+        ...(body.skills ? { skills: body.skills } : {}),
+        ...(body.metadata ? { metadata: body.metadata } : {}),
+      },
+    },
+  }, cwd);
   emitMessageUpdated(
     {
       info: {
@@ -477,8 +631,12 @@ function recordAndEmitUserPrompt(
   // replaces optimistic file parts in place (it gates optimistic part replacement
   // on the first part lacking sessionID). Emitting text first assigns sessionID
   // to part 0, causing subsequent file parts to be appended as duplicates.
-  if (Array.isArray(body.parts)) {
-    for (const part of body.parts) {
+  if (Array.isArray(body.parts) || body.files?.length) {
+    const fileParts: OpenCodePart[] = [
+      ...(body.parts ?? []),
+      ...(body.files ?? []).map((file) => ({ type: "file", url: file.uri, filename: file.name, mime: mimeFromPath(file.name ?? file.uri) })),
+    ];
+    for (const part of fileParts) {
       if (part && typeof part === "object" && "type" in part && (part.type === "file" || part.type === "image")) {
         const p = part as Record<string, unknown>;
         const mime = (typeof p.mime === "string" ? p.mime : undefined) ||
@@ -668,7 +826,14 @@ export function createEventHandler(
         } else {
           if (deltaText) {
             activePartText += deltaText;
-            emitMessagePartDelta(openCodeId, mid, activePartId ?? makePartId(openCodeId, mid, partIndex), deltaText, cwd);
+            emitMessagePartDelta(
+              openCodeId,
+              mid,
+              activePartId ?? makePartId(openCodeId, mid, partIndex),
+              deltaText,
+              cwd,
+              partType,
+            );
           }
         }
         return;
@@ -705,6 +870,7 @@ export function createEventHandler(
       case "subagent_ended": {
         setSubagentStatus(event.childId, undefined, subagentScope);
         emitSessionStatus(event.childId, { type: "idle" }, cwd);
+        emitSessionIdle(event.childId, cwd);
         emitSessionUpdated({
           id: event.childId,
           parentID: openCodeId,
@@ -716,6 +882,7 @@ export function createEventHandler(
         setSubagentStatus(event.childId, undefined, subagentScope);
         emitSessionError(event.childId, { message: event.message ?? "Subagent failed" }, cwd);
         emitSessionStatus(event.childId, { type: "idle" }, cwd);
+        emitSessionIdle(event.childId, cwd);
         emitSessionUpdated({
           id: event.childId,
           parentID: openCodeId,
@@ -730,6 +897,7 @@ export function createEventHandler(
         } else {
           setSubagentStatus(event.childId, undefined, subagentScope);
           emitSessionStatus(event.childId, { type: "idle" }, cwd);
+          emitSessionIdle(event.childId, cwd);
         }
         return;
       }
@@ -886,17 +1054,24 @@ export async function promptSessionAsync(
   cwd: string,
   sessionPath: string,
   body: unknown,
-): Promise<{ queued: boolean; error?: string; status?: number }> {
+): Promise<{ queued: boolean; messageID?: string; error?: string; status?: number }> {
   if (!isPromptBody(body)) {
     return { queued: false, error: "invalid body", status: 400 };
   }
 
   const promptTextParts = extractPromptTextParts(body);
-  const promptText = promptTextParts.map((part) => part.text).join("\n\n");
-  const visiblePromptText = promptTextParts
-    .filter((part) => part.synthetic !== true)
-    .map((part) => part.text)
-    .join("\n\n");
+  const userPromptTextParts = promptTextParts.filter((part) => part.synthetic !== true);
+  const userPromptText = userPromptTextParts.map((part) => part.text).join("\n\n");
+  const contextKey = sessionKey(openCodeId, cwd);
+  const queuedContext = syntheticContext.get(contextKey) ?? [];
+  const fileContext = await extractPromptFileText(body, cwd);
+  const promptText = [
+    ...queuedContext.map((item) => item.text),
+    ...promptTextParts.filter((part) => part.synthetic === true).map((part) => part.text),
+    userPromptText,
+    ...fileContext,
+  ].filter(Boolean).join("\n\n");
+  const visiblePromptText = userPromptText;
   const images = await extractPromptImages(body, cwd);
   if (!promptText && images.length === 0) {
     return { queued: false, error: "no text parts", status: 400 };
@@ -949,32 +1124,33 @@ export async function promptSessionAsync(
     }
 
     if (state.busy) {
-      if (body.delivery !== "steer") {
-        return { queued: false, error: "session busy", status: 409 };
-      }
+      const delivery = body.delivery ?? "queue";
 
       // Steering is an additional input to the active OMP turn, not a second
       // sidecar turn. Keep the existing event subscription and busy lifecycle
       // intact while forwarding OMP's streaming behavior explicitly.
-      recordAndEmitUserPrompt(state, body.messageID, promptText, promptTextParts, body);
-      void state.conn.prompt(buildPromptPayload(promptText, images, "steer")).catch((err) => {
+      const parentMessageID = body.id ?? body.messageID ?? makeMessageId(openCodeId);
+      syntheticContext.delete(contextKey);
+      recordAndEmitUserPrompt(state, parentMessageID, userPromptText, userPromptTextParts, body);
+      void state.conn.prompt(buildPromptPayload(promptText, images, delivery === "steer" ? "steer" : "followUp")).catch((err) => {
         emitSessionError(openCodeId, err, cwd);
         promptLogger.error({ err, sessionID: openCodeId }, `[prompt] ${openCodeId} steering acknowledgement failed`);
       });
-      return { queued: true };
+      return { queued: true, messageID: parentMessageID };
     }
 
     state.busy = true;
     backendForSession(openCodeId).store.beforeTurn?.(openCodeId, cwd);
     emitSessionStatus(openCodeId, { type: "busy" }, cwd);
 
-    const parentMessageID = body.messageID;
+    const parentMessageID = body.id ?? body.messageID ?? makeMessageId(openCodeId);
+    syntheticContext.delete(contextKey);
 
     if (modelRef) {
       state.currentModel = defaultModelRef(modelRef);
     }
 
-    recordAndEmitUserPrompt(state, parentMessageID, promptText, promptTextParts, body);
+    recordAndEmitUserPrompt(state, parentMessageID, userPromptText, userPromptTextParts, body);
 
     (async () => {
       let completed = false;
@@ -1052,12 +1228,24 @@ export async function promptSessionAsync(
       } finally {
         state.unsubscribe();
         state.busy = false;
+        try {
+          const session = await backendForSession(openCodeId).store.get(openCodeId, cwd);
+          if (session) {
+            emitOpenCodeV2Event("session.usage.updated", {
+              sessionID: openCodeId,
+              cost: session.cost,
+              tokens: session.tokens,
+            }, cwd);
+          }
+        } catch {
+          // Usage refresh is best effort; completion events must still be delivered.
+        }
         emitSessionStatus(openCodeId, { type: "idle" }, cwd);
         emitSessionIdle(openCodeId, cwd);
       }
     })();
 
-    return { queued: true };
+    return { queued: true, messageID: parentMessageID };
   } finally {
     release();
   }
@@ -1098,7 +1286,7 @@ export async function abortSession(openCodeId: string, cwd: string): Promise<boo
     state.unsubscribe();
     state.busy = false;
     emitSessionStatus(openCodeId, { type: "idle" }, cwd);
-    emitSessionIdle(openCodeId, cwd);
+    emitSessionIdle(openCodeId, cwd, true);
     return true;
   } finally {
     release();

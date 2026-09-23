@@ -44,6 +44,7 @@ interface TitleIndexHandle {
   selectMessageIds: Statement;
   bindOmpMessageId: Statement;
   deleteMessageIds: Statement;
+  deleteMessageIdsFrom: Statement;
 }
 
 let handle: TitleIndexHandle | undefined;
@@ -65,6 +66,7 @@ export function closeTitleIndex(): void {
     handle.selectMessageIds.finalize();
     handle.bindOmpMessageId.finalize();
     handle.deleteMessageIds.finalize();
+    handle.deleteMessageIdsFrom.finalize();
     handle.db.close();
   } catch {
     /* ignore close errors */
@@ -125,6 +127,7 @@ export function openTitleIndex(overrideDbPath?: string): TitleIndexHandle | unde
         WHERE session_id = ? AND client_message_id = ?
       `),
       deleteMessageIds: db.prepare("DELETE FROM session_message_ids WHERE session_id = ?"),
+      deleteMessageIdsFrom: db.prepare("DELETE FROM session_message_ids WHERE session_id = ? AND created_at >= ?"),
     };
     failedPath = undefined;
     return handle;
@@ -422,6 +425,18 @@ export function deletePersistedMessageIds(sessionId: string, dbPath?: string): v
   if (!index) return;
   try {
     index.deleteMessageIds.run(sessionId);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Delete prompt-to-OMP id mappings at or after a committed revert boundary. */
+export function deletePersistedMessageIdsFrom(sessionId: string, timestamp: number, dbPath?: string): void {
+  if (!sessionId || !Number.isFinite(timestamp)) return;
+  const index = openTitleIndex(dbPath);
+  if (!index) return;
+  try {
+    index.deleteMessageIdsFrom.run(sessionId, timestamp);
   } catch {
     /* best-effort */
   }

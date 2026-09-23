@@ -13,12 +13,18 @@ export interface PermissionRequest {
   directory?: string;
 }
 
-/** Adds the OpenCode v2 field names while retaining the sidecar's legacy ones. */
 export function toOpenCodePermissionRequest(request: PermissionRequest) {
   return {
-    ...request,
+    id: request.id,
+    sessionID: request.sessionID,
     action: request.permission,
     resources: request.patterns,
+    save: request.always,
+    metadata: request.metadata,
+    ...(request.tool ? {
+      source: { type: "tool" as const, messageID: request.tool.messageID, id: request.tool.callID },
+    } : {}),
+    ...(typeof request.metadata.message === "string" ? { message: request.metadata.message } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
-import { readdir, stat, mkdir, unlink, appendFile } from "node:fs/promises";
+import { readdir, stat, mkdir, unlink, appendFile, rename } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -16,7 +16,7 @@ import {
   recordIndexedTitle,
   searchMatchingSessionIds,
 } from "./title-db";
-import { emitSessionUpdated } from "../../shared/sse";
+import { emitOpenCodeV2Event, emitSessionUpdated } from "../../shared/sse";
 import { mapOmpUsageToTokens } from "./messages";
 import type { OpenCodeSession, TokenBreakdown } from "../types";
 
@@ -41,6 +41,7 @@ interface SessionHeader {
   model?: { providerID: string; modelID: string; variant?: string };
   tokens?: TokenBreakdown;
   cost?: number;
+  revert?: { messageID: string; partID?: string; snapshot?: string; files?: unknown[] };
 }
 
 export function encodeCwd(cwd: string): string {
@@ -200,6 +201,9 @@ export async function readSessionHeader(
     let firstUserPrompt: string | undefined;
     let latestMetadata: Record<string, unknown> | undefined;
     let latestArchived: number | undefined;
+    let latestAgent: string | undefined;
+    let latestRevert: SessionHeader["revert"] | null | undefined;
+    let hasRevertUpdate = false;
 
     for (let i = 0; i < maxHeaderLines; i++) {
       const line = lines[i].trim();
@@ -219,6 +223,7 @@ export async function readSessionHeader(
                   ? String(entry.version)
                   : undefined,
             metadata: entry.metadata && typeof entry.metadata === "object" ? entry.metadata : undefined,
+            revert: entry.revert && typeof entry.revert === "object" && typeof entry.revert.messageID === "string" ? entry.revert : undefined,
             parentSession:
               typeof entry.parentSession === "string"
                 ? entry.parentSession
@@ -228,6 +233,11 @@ export async function readSessionHeader(
                     ? entry.parentId
                     : undefined,
             agent: typeof entry.agent === "string" ? entry.agent : (typeof entry.mode === "string" ? entry.mode : undefined),
+            model: typeof entry.modelId === "string" ? {
+              providerID: typeof entry.providerID === "string" ? entry.providerID : (typeof entry.provider === "string" ? entry.provider : "omp"),
+              modelID: entry.modelId,
+              variant: typeof entry.variant === "string" ? entry.variant : "default",
+            } : undefined,
           };
           if (header.metadata) {
             latestMetadata = { ...(latestMetadata || {}), ...header.metadata };
@@ -258,6 +268,13 @@ export async function readSessionHeader(
           latestMetadata = { ...(latestMetadata || {}), ...entry.metadata };
         } else if (entry.type === "archive") {
           latestArchived = typeof entry.archived === "number" ? entry.archived : (entry.archived ? Date.now() : 0);
+        } else if (entry.type === "agent_change" && typeof entry.agent === "string") {
+          latestAgent = entry.agent;
+        } else if (entry.type === "revert_change") {
+          hasRevertUpdate = true;
+          latestRevert = entry.revert && typeof entry.revert === "object" && typeof entry.revert.messageID === "string"
+            ? entry.revert
+            : null;
         } else if (entry.type === "model_change") {
           const rawModel = typeof entry.model === "string" ? entry.model : (typeof entry.modelID === "string" ? entry.modelID : "");
           const slash = rawModel.indexOf("/");
@@ -326,6 +343,11 @@ export async function readSessionHeader(
     if (firstUserPrompt !== undefined) header.firstUserPrompt = firstUserPrompt;
     if (latestMetadata !== undefined) header.metadata = latestMetadata;
     if (latestArchived !== undefined) header.archived = latestArchived;
+    if (latestAgent !== undefined) header.agent = latestAgent;
+    if (hasRevertUpdate) {
+      if (latestRevert) header.revert = latestRevert;
+      else delete header.revert;
+    }
     if (latestModel !== undefined) header.model = latestModel;
     if (latestTokens !== undefined) header.tokens = latestTokens;
     if (latestCost !== undefined) header.cost = latestCost;
@@ -386,15 +408,19 @@ async function buildOpenCodeSession(
     cost: header.cost ?? 0,
     tokens: header.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     metadata: header.metadata,
+    revert: header.revert,
   };
 }
 
 export async function createOmpSession(
   directory?: string | null,
-  options?: { title?: string; parentID?: string },
+  options?: { id?: string; title?: string; parentID?: string; agent?: string; model?: { providerID: string; modelID: string; variant: string }; metadata?: Record<string, unknown> },
 ): Promise<OpenCodeSession> {
   const cwd = directory || process.cwd();
-  const uuid = randomUUID();
+  const requestedID = options?.id && isCanonicalOpenCodeSessionId(options.id)
+    ? fromOpenCodeSessionId(options.id)
+    : undefined;
+  const uuid = requestedID ?? randomUUID();
   const timestamp = new Date().toISOString();
   const fileTimestamp = timestamp.replace(/[:.]/g, "-");
   const fileName = `${fileTimestamp}_${uuid}.jsonl`;
@@ -415,8 +441,12 @@ export async function createOmpSession(
     timestamp,
     cwd,
     title: options?.title,
-    provider: "omp",
-    modelId: "omp",
+    provider: options?.model?.providerID ?? "omp",
+    providerID: options?.model?.providerID ?? "omp",
+    modelId: options?.model?.modelID ?? "omp",
+    variant: options?.model?.variant ?? "default",
+    agent: options?.agent ?? "omp",
+    metadata: options?.metadata,
     thinkingLevel: "off",
     version: 3,
     parentSession: options?.parentID ? fromOpenCodeSessionId(options.parentID) : undefined,
@@ -433,6 +463,9 @@ export async function createOmpSession(
       title: options?.title,
       timestamp,
       version: "3",
+      agent: options?.agent ?? "omp",
+      model: options?.model ?? { providerID: "omp", modelID: "omp", variant: "default" },
+      metadata: options?.metadata,
       parentSession: options?.parentID ? fromOpenCodeSessionId(options.parentID) : undefined,
     },
     filePath,
@@ -453,6 +486,56 @@ export async function deleteOmpSession(
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function moveOmpSession(
+  openCodeId: string,
+  destinationDirectory: string,
+  sourceDirectory?: string | null,
+): Promise<OpenCodeSession | null> {
+  const session = (await getOmpSessionByOpenCodeId(openCodeId, sourceDirectory)) || (await getOmpSessionByOpenCodeId(openCodeId));
+  if (!session) return null;
+  const destination = destinationDirectory.trim();
+  if (!destination) return null;
+
+  try {
+    const content = await Bun.file(session.path).text();
+    const lines = content.split("\n");
+    let updatedHeader = false;
+    const rewritten = lines.map((line) => {
+      if (updatedHeader || !line.trim()) return line;
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type !== "session") return line;
+        entry.cwd = destination;
+        updatedHeader = true;
+        return JSON.stringify(entry);
+      } catch {
+        return line;
+      }
+    }).join("\n");
+    if (!updatedHeader) return null;
+
+    const sourceRoot = join(ompSessionsRoot(), encodeCwd(session.directory));
+    const destinationRoot = join(ompSessionsRoot(), encodeCwd(destination));
+    const destinationPath = join(destinationRoot, relative(sourceRoot, session.path));
+    await mkdir(destinationRoot, { recursive: true });
+    if (destinationPath === session.path) {
+      await Bun.write(session.path, rewritten);
+    } else {
+      const temporaryPath = `${destinationPath}.tmp-${randomUUID()}`;
+      await Bun.write(temporaryPath, rewritten);
+      await rename(temporaryPath, destinationPath);
+      await unlink(session.path);
+    }
+
+    session.directory = destination;
+    session.path = destinationPath;
+    session.time.updated = Date.now();
+    return session;
+  } catch {
+    return null;
   }
 }
 
@@ -479,6 +562,7 @@ export async function setOmpSessionTitle(
     session.title = cleanTitle;
     session.time.updated = Date.now();
     emitSessionUpdated(session as unknown as Record<string, unknown>, session.directory);
+    emitOpenCodeV2Event("session.renamed", { sessionID: openCodeId, title: cleanTitle }, session.directory);
     return session;
   } catch {
     return null;
@@ -490,12 +574,62 @@ export async function updateOmpSession(
   updates: {
     title?: string;
     metadata?: Record<string, unknown>;
+    agent?: string;
+    model?: { providerID: string; modelID: string; variant: string };
+    revert?: { messageID: string; partID?: string; snapshot?: string; files?: unknown[] } | null;
     time?: { archived?: number | null };
   },
   directory?: string | null,
 ): Promise<OpenCodeSession | null> {
   let session = (await getOmpSessionByOpenCodeId(openCodeId, directory)) || (await getOmpSessionByOpenCodeId(openCodeId));
   if (!session) return null;
+
+  if (updates.agent !== undefined && updates.agent !== session.agent) {
+    try {
+      const timestamp = new Date().toISOString();
+      await appendFile(session.path, JSON.stringify({ type: "agent_change", agent: updates.agent, timestamp }) + "\n");
+      session.agent = updates.agent;
+      session.time.updated = Date.now();
+    } catch {
+      // Keep the existing session metadata if the transcript is not writable.
+    }
+  }
+
+  if (updates.model !== undefined && (
+    updates.model.providerID !== session.model.providerID ||
+    updates.model.modelID !== session.model.modelID ||
+    updates.model.variant !== session.model.variant
+  )) {
+    try {
+      const timestamp = new Date().toISOString();
+      const value = `${updates.model.providerID}/${updates.model.modelID}`;
+      await appendFile(session.path, JSON.stringify({ type: "model_change", model: value, role: updates.model.variant, timestamp }) + "\n");
+      session.model = {
+        id: value,
+        providerID: updates.model.providerID,
+        modelID: updates.model.modelID,
+        variant: updates.model.variant,
+      };
+      session.time.updated = Date.now();
+    } catch {
+      // Keep the existing session metadata if the transcript is not writable.
+    }
+  }
+
+  if (updates.revert !== undefined) {
+    try {
+      const timestamp = new Date().toISOString();
+      await appendFile(session.path, JSON.stringify({
+        type: "revert_change",
+        revert: updates.revert ?? undefined,
+        timestamp,
+      }) + "\n");
+      session.revert = updates.revert ?? undefined;
+      session.time.updated = Date.now();
+    } catch {
+      // Keep the existing revert marker if the transcript is not writable.
+    }
+  }
 
   if (updates.title !== undefined && updates.title !== session.title) {
     session = (await setOmpSessionTitle(openCodeId, updates.title, "user", session.directory)) || session;

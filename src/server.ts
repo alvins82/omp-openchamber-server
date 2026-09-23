@@ -12,6 +12,7 @@ import {
   emitQuestionRejected,
   emitBrowserControlRequest,
   emitSessionCompacted,
+  emitOpenCodeV2Event,
 } from "./shared/sse";
 import { BrowserControlBroker, BrowserControlError } from "./adapters/openchamber/browser-control";
 import {
@@ -31,6 +32,8 @@ import {
 } from "./adapters/openchamber/approvals";
 import {
   promptSessionAsync,
+  addSessionSyntheticContext,
+  mimeFromPath,
   abortSession,
   compactSession,
   getSessionStatusMap,
@@ -38,6 +41,7 @@ import {
   removeSessionState,
   shutdownAll,
 } from "./adapters/openchamber/prompt";
+import { page, toV2FileAttachment, toV2Message, toV2Session } from "./adapters/openchamber/v2";
 import { extractTodosFromOmpDetails } from "./providers/omp/todo";
 import { invalidateMessageCache } from "./providers/omp/messages";
 import { getSidecarExtensionPaths, MissingWorkingDirectoryError, withOmpRpc } from "./providers/omp/rpc";
@@ -355,6 +359,104 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function numberOr(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function toV2ModelInfo(
+  value: OpenCodeProvidersResponse["providers"][number]["models"][string],
+  providerID: string,
+) {
+  const model = asRecord(value) ?? {};
+  const limit = asRecord(model.limit) ?? {};
+  const modalities = asRecord(model.modalities) ?? {};
+  const capabilities = asRecord(model.capabilities) ?? {};
+  const input = Array.isArray(capabilities.input)
+    ? capabilities.input.filter((entry): entry is string => typeof entry === "string")
+    : Array.isArray(modalities.input)
+      ? modalities.input.filter((entry): entry is string => typeof entry === "string")
+      : ["text"];
+  const output = Array.isArray(capabilities.output)
+    ? capabilities.output.filter((entry): entry is string => typeof entry === "string")
+    : Array.isArray(modalities.output)
+      ? modalities.output.filter((entry): entry is string => typeof entry === "string")
+      : ["text"];
+  const rawVariants = asRecord(model.variants);
+  const variants = Array.isArray(model.variants)
+    ? model.variants
+    : Object.entries(rawVariants ?? {}).map(([id, settings]) => ({
+        id,
+        ...(settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {}),
+      }));
+  const rawCost = Array.isArray(model.cost) ? model.cost : [asRecord(model.cost) ?? {}];
+  const cost = rawCost.map((entry) => {
+    const item = asRecord(entry) ?? {};
+    const cache = asRecord(item.cache) ?? {};
+    return {
+      ...(asRecord(item.tier) ? { tier: item.tier } : {}),
+      input: numberOr(item.input),
+      output: numberOr(item.output),
+      cache: { read: numberOr(cache.read), write: numberOr(cache.write) },
+    };
+  });
+  const modelID = typeof model.modelID === "string" ? model.modelID : typeof model.id === "string" ? model.id : "omp";
+  return {
+    id: typeof model.id === "string" ? model.id : modelID,
+    modelID,
+    providerID,
+    ...(typeof model.canonical === "string" ? { canonical: model.canonical } : {}),
+    name: typeof model.name === "string" ? model.name : modelID,
+    capabilities: {
+      tools: typeof capabilities.tools === "boolean" ? capabilities.tools : model.tool_call !== false,
+      input,
+      output,
+    },
+    variants,
+    time: { released: numberOr(asRecord(model.time)?.released) },
+    cost,
+    status: "active" as const,
+    enabled: model.disabled !== true,
+    limit: { context: numberOr(limit.context), output: numberOr(limit.output) },
+  };
+}
+
+function toV2Agent() {
+  return {
+    id: "omp",
+    name: "OMP",
+    description: "OMP coding agent",
+    mode: "primary" as const,
+    hidden: false,
+    request: { settings: {}, headers: {}, body: {} },
+    permissions: [],
+  };
+}
+
+function toV2ConfigEntries(directory: string): Array<{ type: "document"; path: string; info: Record<string, unknown> }> {
+  const config = readOmpConfig(directory);
+  const rawModel = config.model;
+  let model: Record<string, unknown> | string | undefined;
+  if (rawModel && typeof rawModel === "object" && !Array.isArray(rawModel)) {
+    const value = rawModel as Record<string, unknown>;
+    const providerID = typeof value.providerID === "string" ? value.providerID : "omp";
+    const modelID = typeof value.model === "string" ? value.model : typeof value.modelID === "string" ? value.modelID : "omp";
+    model = { providerID, model: modelID, ...(typeof value.variant === "string" ? { variant: value.variant } : {}) };
+  } else if (typeof rawModel === "string") {
+    const slash = rawModel.indexOf("/");
+    model = slash > 0
+      ? { providerID: rawModel.slice(0, slash), model: rawModel.slice(slash + 1) }
+      : { providerID: "omp", model: rawModel };
+  }
+  const defaultAgent = typeof config.default_agent === "string"
+    ? config.default_agent
+    : typeof config.agent === "string" ? config.agent : "omp";
+  return [{
+    type: "document",
+    path: "omp-sidecar",
+    info: { default_agent: defaultAgent, ...(model !== undefined ? { model } : {}) },
+  }];
+}
+
 
 // OC_SIDECAR_PORT overrides the default 4096 so the route-level test suite can
 // run a second instance without colliding with the live sidecar.
@@ -422,6 +524,7 @@ const server = Bun.serve<SidecarWebSocketData>({
     const jsonError = (message: string, status: number): Response => {
       return json({ error: message }, { status });
     };
+    const noContent = (): Response => new Response(null, { status: 204, headers: cors });
 
     const url = new URL(req.url);
     const path = url.pathname;
@@ -1328,16 +1431,30 @@ const MIME_TYPES: Record<string, string> = {
       // Create session (POST /session)
       if (p === "/session" && req.method === "POST") {
         try {
-          const body = (await readJson(req)) as
-            | { title?: string; parentID?: string; model?: { providerID?: string } }
-            | undefined;
+          const body = asRecord(await readJson(req)) ?? {};
+          const location = asRecord(body.location);
+          const model = asRecord(body.model);
+          const sessionDirectory = typeof location?.directory === "string" ? location.directory : dir;
           // D1: a namespaced model prefix selects the backend for the new
           // session; absent or unknown prefix falls through to the default.
-          const prefix = splitProviderPrefix(body?.model?.providerID ?? "");
+          const requestedProvider = typeof model?.providerID === "string" ? model.providerID : "";
+          const prefix = splitProviderPrefix(requestedProvider);
           const backend = (prefix.backendId ? backendById(prefix.backendId) : undefined) ?? defaultBackend();
-          const session = await backend.store.create(dir, body);
+          const modelID = typeof model?.id === "string" ? model.id : typeof model?.modelID === "string" ? model.modelID : undefined;
+          const session = await backend.store.create(sessionDirectory, {
+            id: typeof body.id === "string" ? body.id : undefined,
+            title: typeof body.title === "string" ? body.title : undefined,
+            parentID: typeof body.parentID === "string" ? body.parentID : undefined,
+            agent: typeof body.agent === "string" ? body.agent : undefined,
+            model: modelID && requestedProvider ? {
+              providerID: prefix.native,
+              modelID,
+              variant: typeof model?.variant === "string" ? model.variant : "default",
+            } : undefined,
+            metadata: asRecord(body.metadata) ?? undefined,
+          });
           emitSessionCreated(session as unknown as Record<string, unknown>, session.directory);
-          return json(session, { status: 201 });
+          return json({ data: toV2Session(session) });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "create failed", 500);
         }
@@ -1372,14 +1489,22 @@ const MIME_TYPES: Record<string, string> = {
           const archived = archivedParam === "true" ? true : archivedParam === "false" ? false : undefined;
           const limit = url.searchParams.get("limit");
           const search = url.searchParams.get("search") || url.searchParams.get("query") || url.searchParams.get("q") || undefined;
-          const all = roots || url.searchParams.get("all") === "true";
+          const all = roots || url.searchParams.get("all") === "true" || !dir;
           const sessions = await listSessionsAcrossBackends(all ? null : dir, {
             all,
             archived,
-            limit: limit != null ? parseInt(limit, 10) : undefined,
             search,
           });
-          return json(sessions);
+          const parentID = url.searchParams.get("parentID");
+          const filtered = parentID === null
+            ? sessions
+            : sessions.filter((session) => session.parentID === (parentID === "null" ? undefined : parentID));
+          const ordered = [...filtered].sort((a, b) => a.time.updated - b.time.updated);
+          const order = url.searchParams.get("order") === "asc" ? "asc" : "desc";
+          const requestedLimit = limit == null ? 100 : Number.parseInt(limit, 10);
+          const pageLimit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 500)) : 100;
+          const currentPage = page(ordered.map(toV2Session), pageLimit, url.searchParams.get("cursor"), order);
+          return json({ data: currentPage.data, cursor: currentPage.cursor });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "list failed", 500);
         }
@@ -1399,6 +1524,121 @@ const MIME_TYPES: Record<string, string> = {
         return json(Object.fromEntries(Object.keys(statuses).map((sessionID) => [sessionID, { type: "running" }])));
       }
 
+      const sessionMoveMatch = p.match(/^\/session\/([^/]+)\/move$/);
+      if (sessionMoveMatch && req.method === "POST") {
+        try {
+          const sessionID = decodeURIComponent(sessionMoveMatch[1]!);
+          const { backend, session } = await resolveSessionRoute(sessionID, dir);
+          if (!session) return jsonError("session not found", 404);
+          const body = asRecord(await readJson(req));
+          if (typeof body?.directory !== "string" || !body.directory.trim()) return jsonError("directory required", 400);
+          const moved = await backend.store.move(sessionID, body.directory, session.directory);
+          if (!moved) return jsonError("session move failed", 500);
+          emitOpenCodeV2Event("session.moved", {
+            sessionID,
+            projectID: moved.projectID,
+            location: { directory: moved.directory },
+          }, moved.directory);
+          return noContent();
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "session move failed", 500);
+        }
+      }
+
+      const syntheticMatch = p.match(/^\/session\/([^/]+)\/synthetic$/);
+      if (syntheticMatch && req.method === "POST") {
+        try {
+          const sessionID = decodeURIComponent(syntheticMatch[1]!);
+          const { session } = await resolveSessionRoute(sessionID, dir);
+          if (!session) return jsonError("session not found", 404);
+          const body = asRecord(await readJson(req));
+          if (typeof body?.text !== "string") return jsonError("text required", 400);
+          const item = addSessionSyntheticContext(sessionID, session.directory, {
+            id: typeof body.id === "string" ? body.id : undefined,
+            text: body.text,
+            description: typeof body.description === "string" ? body.description : undefined,
+            metadata: asRecord(body.metadata) ?? undefined,
+          });
+          return json({ data: item });
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "synthetic message failed", 500);
+        }
+      }
+
+      const sessionModelMatch = p.match(/^\/session\/([^/]+)\/model$/);
+      if (sessionModelMatch && req.method === "POST") {
+        try {
+          const sessionID = decodeURIComponent(sessionModelMatch[1]!);
+          const { backend, session } = await resolveSessionRoute(sessionID, dir);
+          if (!session) return jsonError("session not found", 404);
+          const body = asRecord(await readJson(req));
+          const model = asRecord(body?.model);
+          const providerID = typeof model?.providerID === "string" ? model.providerID : "";
+          const modelID = typeof model?.id === "string" ? model.id : "";
+          if (!providerID || !modelID) return jsonError("model providerID and id are required", 400);
+          const prefix = splitProviderPrefix(providerID);
+          if (prefix.backendId && backendById(prefix.backendId) !== backend) {
+            return jsonError("model provider does not belong to this session's backend", 400);
+          }
+          const modelRef = {
+            providerID: prefix.native,
+            modelID,
+            variant: typeof model?.variant === "string" ? model.variant : "default",
+          };
+          const updated = await backend.store.update(sessionID, { model: modelRef }, session.directory);
+          if (!updated) return jsonError("session not found", 404);
+          emitOpenCodeV2Event("session.model.selected", {
+            sessionID,
+            model: { id: modelID, providerID, variant: modelRef.variant },
+          }, session.directory);
+          return noContent();
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "model switch failed", 500);
+        }
+      }
+
+      const sessionAgentMatch = p.match(/^\/session\/([^/]+)\/agent$/);
+      if (sessionAgentMatch && req.method === "POST") {
+        try {
+          const sessionID = decodeURIComponent(sessionAgentMatch[1]!);
+          const { backend, session } = await resolveSessionRoute(sessionID, dir);
+          if (!session) return jsonError("session not found", 404);
+          const body = asRecord(await readJson(req));
+          if (typeof body?.agent !== "string" || !body.agent) return jsonError("agent required", 400);
+          const previous = session.agent;
+          const updated = await backend.store.update(sessionID, { agent: body.agent }, session.directory);
+          if (!updated) return jsonError("session not found", 404);
+          emitOpenCodeV2Event("session.agent.selected", { sessionID, agent: body.agent, previous }, session.directory);
+          return noContent();
+        } catch (err) {
+          return jsonError(err instanceof Error ? err.message : "agent switch failed", 500);
+        }
+      }
+
+      const sessionFormListMatch = p.match(/^\/session\/([^/]+)\/form$/);
+      if (sessionFormListMatch && req.method === "GET") {
+        const sessionID = decodeURIComponent(sessionFormListMatch[1]!);
+        const forms = listPendingQuestions(dir).filter((request) => request.sessionID === sessionID).map(toOpenCodeFormRequest);
+        return json({ data: forms });
+      }
+
+      const sessionFormMatch = p.match(/^\/session\/([^/]+)\/form\/([^/]+)$/);
+      if (sessionFormMatch && req.method === "GET") {
+        const sessionID = decodeURIComponent(sessionFormMatch[1]!);
+        const formID = decodeURIComponent(sessionFormMatch[2]!);
+        const pending = getPendingQuestion(formID);
+        if (!pending || pending.sessionID !== sessionID) return jsonError("form not found", 404);
+        return json({ data: { ...toOpenCodeFormRequest(pending), state: { status: "pending" } } });
+      }
+
+      if (sessionFormMatch && req.method === "DELETE") {
+        const sessionID = decodeURIComponent(sessionFormMatch[1]!);
+        const formID = decodeURIComponent(sessionFormMatch[2]!);
+        const pending = getPendingQuestion(formID);
+        if (!pending || pending.sessionID !== sessionID) return jsonError("form not found", 404);
+        return rejectQuestion(formID) ? noContent() : jsonError("form not found", 404);
+      }
+
       // Adapt OpenCode's typed form actions to the sidecar's pending question
       // requests. The pending question id is the form id on the wire.
       const formReplyMatch = p.match(/^\/session\/([^/]+)\/form\/([^/]+)\/reply$/);
@@ -1410,7 +1650,7 @@ const MIME_TYPES: Record<string, string> = {
         const answer = asRecord(body?.answer);
         if (!answer) return jsonError("answer required", 400);
         const ok = replyQuestion(formID!, toQuestionAnswers(pending, answer));
-        return json(ok);
+        return ok ? noContent() : jsonError("form not found", 404);
       }
 
       const formCancelMatch = p.match(/^\/session\/([^/]+)\/form\/([^/]+)\/cancel$/);
@@ -1419,7 +1659,7 @@ const MIME_TYPES: Record<string, string> = {
         const pending = getPendingQuestion(formID!);
         if (!pending || pending.sessionID !== sessionID) return jsonError("form not found", 404);
         const ok = rejectQuestion(formID!);
-        return json(ok);
+        return ok ? noContent() : jsonError("form not found", 404);
       }
 
       // Single session routes: /session/:id
@@ -1430,7 +1670,7 @@ const MIME_TYPES: Record<string, string> = {
           try {
             const { session } = await resolveSessionRoute(openCodeId, dir);
             if (!session) return jsonError("session not found", 404);
-            return json(session);
+            return json({ data: toV2Session(session) });
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "lookup failed", 500);
         }
@@ -1443,7 +1683,7 @@ const MIME_TYPES: Record<string, string> = {
           const ok = await backend.store.delete(openCodeId, dir);
           removeSessionState(openCodeId, session.directory);
           emitSessionDeleted(openCodeId);
-          return json(ok);
+          return ok ? noContent() : jsonError("session not found", 404);
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "delete failed", 500);
         }
@@ -1463,7 +1703,7 @@ const MIME_TYPES: Record<string, string> = {
             dir,
           );
           if (!updated) return jsonError("session not found", 404);
-          return json(updated);
+          return noContent();
         } catch (err) {
           return jsonError(err instanceof Error ? err.message : "update failed", 500);
         }
@@ -1559,14 +1799,72 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const { backend, session } = await resolveSessionRoute(forkMatch[1], dir);
         if (!session) return jsonError("session not found", 404);
-        const forked = await backend.store.create(session.directory, {
-          parentID: forkMatch[1],
-          title: `Fork of ${session.title ?? session.id}`,
-        });
+        const body = asRecord(await readJson(req));
+        const before = typeof body?.before === "string" ? body.before : undefined;
+        const forked = await backend.store.fork(forkMatch[1]!, session.directory, before);
+        if (!forked) return jsonError(before ? "fork boundary not found" : "session fork failed", before ? 404 : 500);
         emitSessionCreated(forked as unknown as Record<string, unknown>, forked.directory);
-        return json(forked, { status: 201 });
+        return json({ data: toV2Session(forked) });
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "fork failed", 500);
+      }
+    }
+
+    const revertStageMatch = p.match(/^\/session\/([^/]+)\/revert\/stage$/);
+    if (revertStageMatch && req.method === "POST") {
+      try {
+        const sessionID = decodeURIComponent(revertStageMatch[1]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const body = asRecord(await readJson(req));
+        if (typeof body?.messageID !== "string") return jsonError("messageID required", 400);
+        const revert = { messageID: body.messageID };
+        const updated = await backend.store.update(sessionID, { revert }, session.directory);
+        if (!updated) return jsonError("session not found", 404);
+        emitOpenCodeV2Event("session.revert.staged", { sessionID, revert }, session.directory);
+        return json({ data: revert });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "revert stage failed", 500);
+      }
+    }
+
+    const revertClearMatch = p.match(/^\/session\/([^/]+)\/revert$/);
+    if (revertClearMatch && req.method === "DELETE") {
+      try {
+        const sessionID = decodeURIComponent(revertClearMatch[1]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const updated = await backend.store.update(sessionID, { revert: null }, session.directory);
+        if (!updated) return jsonError("session not found", 404);
+        emitOpenCodeV2Event("session.revert.cleared", { sessionID }, session.directory);
+        return noContent();
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "revert clear failed", 500);
+      }
+    }
+
+    const revertCommitMatch = p.match(/^\/session\/([^/]+)\/revert\/commit$/);
+    if (revertCommitMatch && req.method === "POST") {
+      try {
+        const sessionID = decodeURIComponent(revertCommitMatch[1]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const target = session.revert?.messageID;
+        if (!target) return jsonError("no staged revert", 409);
+        const committed = await backend.store.commitRevert(sessionID, target, session.directory);
+        if (!committed) return jsonError("revert boundary not found", 404);
+        emitOpenCodeV2Event("session.revert.committed", { sessionID, to: target }, session.directory);
+        const updated = await backend.store.get(sessionID, session.directory);
+        if (updated) {
+          emitOpenCodeV2Event("session.usage.updated", {
+            sessionID,
+            cost: updated.cost,
+            tokens: updated.tokens,
+          }, session.directory);
+        }
+        return noContent();
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "revert commit failed", 500);
       }
     }
 
@@ -1592,7 +1890,16 @@ const MIME_TYPES: Record<string, string> = {
         }
         invalidateMessageCache(session.id, session.directory);
         emitSessionCompacted(session.id, session.directory);
-        return json(true);
+        const body = asRecord(await readJson(req));
+        const message = {
+          id: typeof body?.id === "string" ? body.id : randomUUID(),
+          sessionID: session.id,
+          time: { created: Date.now() },
+          type: "compaction",
+          payload: {},
+          delivery: body?.delivery === "steer" ? "steer" : "queue",
+        };
+        return json({ data: message });
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "summarize failed", 500);
       }
@@ -1615,14 +1922,21 @@ const MIME_TYPES: Record<string, string> = {
     if (cmdMatch && req.method === "POST") {
       try {
         const openCodeId = cmdMatch[1];
-        const body = (await readJson(req)) as { command?: string; arguments?: string } | undefined;
+        const body = asRecord(await readJson(req));
         const { session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
-        const commandText = `/${body?.command ?? ""}${body?.arguments ? ` ${body.arguments}` : ""}`.trim();
+        const command = typeof body?.name === "string" ? body.name : typeof body?.command === "string" ? body.command : "";
+        const argumentsText = typeof body?.text === "string" ? body.text : typeof body?.arguments === "string" ? body.arguments : "";
+        const commandText = `/${command}${argumentsText ? ` ${argumentsText}` : ""}`.trim();
         const result = await promptSessionAsync(openCodeId, session.directory, session.path, {
-          parts: [{ type: "text", text: commandText }],
+          id: typeof body?.id === "string" ? body.id : undefined,
+          text: commandText,
+          files: Array.isArray(body?.files) ? body.files : undefined,
+          agents: Array.isArray(body?.agents) ? body.agents : undefined,
+          skills: Array.isArray(body?.skills) ? body.skills : undefined,
+          delivery: body?.delivery === "steer" ? "steer" : body?.delivery === "queue" ? "queue" : undefined,
         });
-        if (result.queued) return json({ queued: true });
+        if (result.queued) return noContent();
         return jsonError(result.error ?? "command failed", result.status ?? 400);
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "command failed", 500);
@@ -1637,14 +1951,50 @@ const MIME_TYPES: Record<string, string> = {
         const { backend, session } = await resolveSessionRoute(openCodeId, dir);
         if (!session) return jsonError("session not found", 404);
         if (!backend.capabilities.shell) return jsonError("shell not supported by backend", 400);
-        const body = (await readJson(req)) as { command?: string } | undefined;
-        const output = await withOmpRpc(session.directory, async (conn) => {
-          return await conn.request("bash", { command: body?.command ?? "" });
-        }).catch((err) => String(err));
-        return json({
-          info: { id: `msg_${openCodeId}_shell_${Date.now()}`, role: "assistant", sessionID: openCodeId },
-          parts: [{ id: `part_${openCodeId}_0`, type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }],
-        });
+        const body = asRecord(await readJson(req));
+        const command = typeof body?.command === "string" ? body.command : "";
+        const shellID = typeof body?.id === "string" && body.id ? body.id : randomUUID();
+        const started = Date.now();
+        const shell = {
+          id: shellID,
+          status: "running" as const,
+          command,
+          cwd: session.directory,
+          shell: "bash",
+          file: "/bin/bash",
+          metadata: {},
+          time: { started },
+        };
+        emitOpenCodeV2Event("session.shell.started", { sessionID: openCodeId, shell }, session.directory);
+        let rawOutput: unknown;
+        try {
+          rawOutput = await withOmpRpc(session.directory, async (conn) => conn.request("bash", { command }));
+        } catch (err) {
+          rawOutput = String(err);
+        }
+        const outputRecord = asRecord(rawOutput);
+        const outputText = typeof rawOutput === "string"
+          ? rawOutput
+          : typeof outputRecord.output === "string"
+            ? outputRecord.output
+            : rawOutput == null ? "" : JSON.stringify(rawOutput);
+        const exit = typeof outputRecord.exitCode === "number"
+          ? outputRecord.exitCode
+          : typeof outputRecord.exit === "number" ? outputRecord.exit : undefined;
+        const completed = Date.now();
+        const endedShell = {
+          ...shell,
+          status: "exited" as const,
+          ...(exit !== undefined ? { exit } : {}),
+          time: { started, completed },
+        };
+        emitOpenCodeV2Event("session.shell.ended", {
+          sessionID: openCodeId,
+          shell: endedShell,
+          output: { output: outputText, cursor: outputText.length, size: outputText.length, truncated: false },
+        }, session.directory);
+        logger.debug({ sessionID: openCodeId, output: outputText.slice(0, 200) }, "shell command completed");
+        return noContent();
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "shell failed", 500);
       }
@@ -1658,12 +2008,186 @@ const MIME_TYPES: Record<string, string> = {
         if (!session) return jsonError("session not found", 404);
         const messages = await backend.store.transcript(msgMatch[1], session.directory);
         if (messages == null) return jsonError("load failed", 500);
-        return json(messages);
+        const ordered = [...messages]
+          .sort((a, b) => (a.info.time?.created ?? 0) - (b.info.time?.created ?? 0))
+          .map(toV2Message);
+        const requestedLimit = url.searchParams.get("limit");
+        const parsedLimit = requestedLimit == null ? 100 : Number.parseInt(requestedLimit, 10);
+        const pageLimit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 500)) : 100;
+        const order = !url.searchParams.get("cursor") && url.searchParams.get("order") === "asc" ? "asc" : "desc";
+        const currentPage = page(ordered, pageLimit, url.searchParams.get("cursor"), order);
+        return json({ data: currentPage.data, cursor: currentPage.cursor });
       } catch (err) {
         if (err instanceof MissingWorkingDirectoryError) {
           return json({ error: err.message, reason: err.reason, cwd: err.cwd }, { status: err.statusCode });
         }
         return jsonError(err instanceof Error ? err.message : "load failed", 500);
+      }
+    }
+
+    const messageGetMatch = p.match(/^\/session\/([^/]+)\/message\/([^/]+)$/);
+    if (messageGetMatch && req.method === "GET") {
+      try {
+        const sessionID = decodeURIComponent(messageGetMatch[1]!);
+        const messageID = decodeURIComponent(messageGetMatch[2]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const messages = await backend.store.transcript(sessionID, session.directory);
+        const message = messages?.find((entry) => entry.info.id === messageID);
+        if (!message) return jsonError("message not found", 404);
+        return json({ data: toV2Message(message) });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "message lookup failed", 500);
+      }
+    }
+
+    const sessionContextMatch = p.match(/^\/session\/([^/]+)\/context$/);
+    if (sessionContextMatch && req.method === "GET") {
+      try {
+        const sessionID = decodeURIComponent(sessionContextMatch[1]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const messages = await backend.store.transcript(sessionID, session.directory);
+        if (messages == null) return jsonError("load failed", 500);
+        return json({ data: messages.map(toV2Message) });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "context lookup failed", 500);
+      }
+    }
+
+    const sessionDiffMatch = p.match(/^\/session\/([^/]+)\/diff$/);
+    if (sessionDiffMatch && req.method === "GET") {
+      const sessionID = decodeURIComponent(sessionDiffMatch[1]!);
+      const { session } = await resolveSessionRoute(sessionID, dir);
+      if (!session) return jsonError("session not found", 404);
+      const rawContext = Number.parseInt(url.searchParams.get("context") ?? "3", 10);
+      const context = Number.isFinite(rawContext) ? Math.max(0, Math.min(20, rawContext)) : 3;
+      try {
+        const proc = Bun.spawn(["git", "-C", session.directory, "diff", "--no-ext-diff", "--no-color", `--unified=${context}`, "HEAD", "--"], {
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const patch = await new Response(proc.stdout).text();
+        await proc.exited;
+        const diffs = patch.split(/^diff --git /m).slice(1).map((chunk) => {
+          const fullPatch = `diff --git ${chunk}`;
+          const header = fullPatch.slice(0, fullPatch.indexOf("\n"));
+          const headerMatch = header.match(/^diff --git a\/(.+) b\/(.+)$/);
+          const deleted = fullPatch.includes("deleted file mode ");
+          const added = fullPatch.includes("new file mode ");
+          const file = headerMatch?.[2] ?? headerMatch?.[1] ?? header.replace(/^diff --git /, "");
+          return {
+            file,
+            patch: fullPatch,
+            additions: fullPatch.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++" )).length,
+            deletions: fullPatch.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---" )).length,
+            status: added ? "added" as const : deleted ? "deleted" as const : "modified" as const,
+          };
+        });
+        return json({ data: diffs });
+      } catch {
+        return json({ data: [] });
+      }
+    }
+
+    const sessionGenerateMatch = p.match(/^\/session\/([^/]+)\/generate$/);
+    if (sessionGenerateMatch && req.method === "POST") {
+      try {
+        const sessionID = decodeURIComponent(sessionGenerateMatch[1]!);
+        const { backend, session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const body = asRecord(await readJson(req));
+        if (typeof body?.prompt !== "string" || !body.prompt.trim()) return jsonError("prompt required", 400);
+        const messages = await backend.store.transcript(sessionID, session.directory);
+        const history = (messages ?? []).slice(-20).map((message) => {
+          const role = message.info.role === "user" ? "User" : message.info.role === "assistant" ? "Assistant" : "";
+          if (!role) return "";
+          const content = (message.parts ?? []).filter((part) => part.type === "text" || part.type === "reasoning")
+            .map((part) => part.text).join("\n").trim();
+          return content ? `${role}: ${content}` : "";
+        }).filter(Boolean).join("\n\n").slice(-48_000);
+        const prompt = [history ? `Conversation context:\n${history}` : "", body.prompt].filter(Boolean).join("\n\n");
+        let generated;
+        try {
+          generated = await generateSmallModelText({
+            prompt,
+            maxOutputTokens: 1200,
+            preferredProviderID: session.model.providerID,
+            preferredModelID: session.model.modelID,
+            directory: session.directory,
+          });
+        } catch {
+          generated = await generateSmallModelText({ prompt, maxOutputTokens: 1200, directory: session.directory });
+        }
+        return json({ data: { text: generated.text } });
+      } catch (err) {
+        const status = typeof (err as { statusCode?: unknown })?.statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : 500;
+        return jsonError(err instanceof Error ? err.message : "session generation failed", status);
+      }
+    }
+
+    if (p === "/generate/text" && req.method === "POST") {
+      try {
+        const body = asRecord(await readJson(req));
+        if (typeof body?.prompt !== "string" || !body.prompt.trim()) return jsonError("prompt required", 400);
+        const model = asRecord(body.model);
+        const selection = splitProviderPrefix(typeof model?.providerID === "string" ? model.providerID : "");
+        const generated = await generateSmallModelText({
+          prompt: body.prompt,
+          directory: dir ?? process.cwd(),
+          preferredProviderID: selection.native || undefined,
+          preferredModelID: typeof model?.id === "string" ? model.id : undefined,
+        });
+        return json({ data: { text: generated.text } });
+      } catch (err) {
+        const status = typeof (err as { statusCode?: unknown })?.statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : 500;
+        return jsonError(err instanceof Error ? err.message : "text generation failed", status);
+      }
+    }
+
+    const promptMatch = p.match(/^\/session\/([^/]+)\/prompt$/);
+    if (promptMatch && req.method === "POST") {
+      try {
+        const sessionID = decodeURIComponent(promptMatch[1]!);
+        const body = await readJson(req);
+        const input = asRecord(body);
+        const { session } = await resolveSessionRoute(sessionID, dir);
+        if (!session) return jsonError("session not found", 404);
+        const result = await promptSessionAsync(sessionID, session.directory, session.path, body);
+        if (!result.queued) return jsonError(result.error ?? "prompt failed", result.status ?? 400);
+        const files = Array.isArray(input?.files) ? input.files.flatMap((entry) => {
+          const file = asRecord(entry);
+          if (typeof file?.uri !== "string") return [];
+          return [toV2FileAttachment({
+            uri: file.uri,
+            mime: mimeFromPath(typeof file.name === "string" ? file.name : file.uri) ?? undefined,
+            ...(typeof file.name === "string" ? { name: file.name } : {}),
+            ...(typeof file.description === "string" ? { description: file.description } : {}),
+            ...(asRecord(file.mention) ? { mention: file.mention as { start: number; end: number; text: string } } : {}),
+          })];
+        }) : [];
+        const delivery = input?.delivery === "steer" ? "steer" : "queue";
+        const message = {
+          id: result.messageID ?? (typeof input?.id === "string" ? input.id : randomUUID()),
+          sessionID,
+          time: { created: Date.now() },
+          type: "user",
+          payload: {
+            text: typeof input?.text === "string" ? input.text : "",
+            ...(files.length ? { files } : {}),
+            ...(Array.isArray(input?.agents) ? { agents: input.agents } : {}),
+            ...(Array.isArray(input?.skills) ? { skills: input.skills } : {}),
+            ...(asRecord(input?.metadata) ? { metadata: input.metadata } : {}),
+          },
+          delivery,
+        };
+        return json({ data: message });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "prompt failed", 500);
       }
     }
 
@@ -1698,7 +2222,19 @@ const MIME_TYPES: Record<string, string> = {
       }
     }
 
-    // Abort
+    const interruptMatch = p.match(/^\/session\/([^/]+)\/interrupt$/);
+    if (interruptMatch && req.method === "POST") {
+      try {
+        const sessionID = decodeURIComponent(interruptMatch[1]!);
+        const { session } = await resolveSessionRoute(sessionID, dir);
+        const interrupted = session ? await abortSession(sessionID, session.directory) : false;
+        return json({ interrupted });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "interrupt failed", 500);
+      }
+    }
+
+    // Legacy abort route
     const abortMatch = p.match(/^\/session\/([^/]+)\/abort$/);
     if (abortMatch && req.method === "POST") {
       try {
@@ -1723,16 +2259,47 @@ const MIME_TYPES: Record<string, string> = {
       });
     }
 
-    if ((p === "/provider" || p === "/providers") && req.method === "GET") {
+    if (p === "/provider" && req.method === "GET") {
       try {
         const cwd = dir ?? process.cwd();
         const providersData = await fetchProvidersForDirectory(cwd);
-        const all = providersData.providers.map((pr) => ({ id: pr.id, name: pr.name }));
-        const connected = providersData.providers.map((pr) => pr.id);
+        const providers = providersData.providers.map((provider) => ({
+          id: provider.id,
+          name: provider.name,
+          activation: "enabled" as const,
+          package: "omp",
+        }));
+        return json({ location: { directory: cwd }, data: providers });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "provider list failed", 500);
+      }
+    }
+
+    const providerMatch = p.match(/^\/provider\/([^/]+)$/);
+    if (providerMatch && req.method === "GET") {
+      try {
+        const cwd = dir ?? process.cwd();
+        const providerID = decodeURIComponent(providerMatch[1]!);
+        const providersData = await fetchProvidersForDirectory(cwd);
+        const provider = providersData.providers.find((entry) => entry.id === providerID);
+        if (!provider) return jsonError("provider not found", 404);
         return json({
-          all,
+          location: { directory: cwd },
+          data: { id: provider.id, name: provider.name, activation: "enabled", package: "omp" },
+        });
+      } catch (err) {
+        return jsonError(err instanceof Error ? err.message : "provider lookup failed", 500);
+      }
+    }
+
+    if (p === "/providers" && req.method === "GET") {
+      try {
+        const cwd = dir ?? process.cwd();
+        const providersData = await fetchProvidersForDirectory(cwd);
+        return json({
+          all: providersData.providers.map((provider) => ({ id: provider.id, name: provider.name })),
           default: providersData.default,
-          connected,
+          connected: providersData.providers.map((provider) => provider.id),
           providers: providersData.providers,
         });
       } catch (err) {
@@ -1798,9 +2365,9 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const providersData = await fetchProvidersForDirectory(dir ?? process.cwd());
         const models = providersData.providers.flatMap((provider) =>
-          Object.values(provider.models).map((model) => ({ ...model, providerID: provider.id })),
+          Object.values(provider.models).map((model) => toV2ModelInfo(model, provider.id)),
         );
-        return json(models);
+        return json({ location: { directory: dir ?? process.cwd() }, data: models });
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "model list failed", 500);
       }
@@ -1812,9 +2379,12 @@ const MIME_TYPES: Record<string, string> = {
       try {
         const providersData = await fetchProvidersForDirectory(dir ?? process.cwd());
         const provider = providersData.providers.find((entry) => entry.id === providersData.default.default);
-        if (!provider) return json(null);
+        if (!provider) return json({ location: { directory: dir ?? process.cwd() }, data: null });
         const model = Object.values(provider.models)[0];
-        return json(model ? { providerID: provider.id, modelID: model.id } : null);
+        return json({
+          location: { directory: dir ?? process.cwd() },
+          data: model ? toV2ModelInfo(model, provider.id) : null,
+        });
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "default model lookup failed", 500);
       }
@@ -1841,11 +2411,10 @@ const MIME_TYPES: Record<string, string> = {
         const targetDir = isAbsolute(relPath) ? relPath : join(effectiveDir, relPath);
         const entries = await readdir(targetDir, { withFileTypes: true });
         const list = entries.map((e) => ({
-          name: e.name,
           type: e.isDirectory() ? "directory" : "file",
-          path: join(relPath, e.name),
+          path: join(relPath, e.name).replace(/\\/g, "/"),
         }));
-        return json(list);
+        return json({ location: { directory: effectiveDir }, data: list });
       } catch (err) {
         return jsonError(err instanceof Error ? err.message : "readdir failed", 500);
       }
@@ -1853,34 +2422,40 @@ const MIME_TYPES: Record<string, string> = {
 
     if (p === "/find/file" && req.method === "GET") {
       const query = url.searchParams.get("query") ?? "";
+      const requestedType = url.searchParams.get("type");
+      const requestedLimit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 500)) : 50;
       try {
         const entries = await readdir(effectiveDir, { recursive: true, withFileTypes: true });
         const matches = entries
-          .filter((e) => !e.isDirectory() && (!query || e.name.toLowerCase().includes(query.toLowerCase())))
-          .slice(0, 50)
-          .map((e) => e.name);
-        return json(matches);
+          .map((entry) => {
+            const raw = entry as typeof entry & { parentPath?: string; path?: string };
+            const parent = raw.parentPath ?? raw.path ?? effectiveDir;
+            const absolutePath = join(parent, entry.name);
+            const path = absolutePath.startsWith(`${effectiveDir}/`)
+              ? absolutePath.slice(effectiveDir.length + 1)
+              : entry.name;
+            return { path: path.replace(/\\/g, "/"), type: entry.isDirectory() ? "directory" as const : "file" as const };
+          })
+          .filter((entry) => (!requestedType || entry.type === requestedType) &&
+            (!query || entry.path.toLowerCase().includes(query.toLowerCase())))
+          .slice(0, limit);
+        return json({ location: { directory: effectiveDir }, data: matches });
       } catch {
-        return json([]);
+        return json({ location: { directory: effectiveDir }, data: [] });
       }
     }
 
     // Agent catalog
     if (p === "/agent" && req.method === "GET") {
-      return json([
-        {
-          name: "omp",
-          description: "OMP coding agent",
-          mode: "primary",
-          builtIn: true,
-          tools: {},
-        },
-      ]);
+      return json({ location: { directory: dir ?? process.cwd() }, data: [toV2Agent()] });
     }
 
     // Config
     if ((p === "/config" || p === "/global/config") && req.method === "GET") {
-      return json(readOmpConfig());
+      return p === "/config"
+        ? json(toV2ConfigEntries(effectiveDir))
+        : json(readOmpConfig(effectiveDir));
     }
 
     if (
@@ -1897,11 +2472,10 @@ const MIME_TYPES: Record<string, string> = {
       return json([
         {
           id: "global",
-          worktree: effectiveDir,
-          path: effectiveDir,
-          directory: effectiveDir,
-          label: "Project",
+          canonical: effectiveDir,
+          name: basename(effectiveDir),
           time: { created: Date.now(), updated: Date.now() },
+          sandboxes: [],
         },
       ]);
     }
@@ -1943,33 +2517,81 @@ const MIME_TYPES: Record<string, string> = {
     // Commands
     if (p === "/command" && req.method === "GET") {
       const cmds = await listAvailableCommands(dir);
-      return json(cmds);
+      return json({
+        location: { directory: effectiveDir },
+        data: cmds.map(({ name, description }) => ({ name, ...(description ? { description } : {}) })),
+      });
     }
 
     // Skill
     if (p === "/skill" && req.method === "GET") {
       const skills = await listAvailableSkills(dir);
-      return json(skills);
+      const data = await Promise.all(skills.map(async (skill) => ({
+        id: skill.name,
+        name: skill.name,
+        description: skill.description,
+        path: skill.path,
+        content: await Bun.file(skill.path).text().catch(() => ""),
+      })));
+      return json({ location: { directory: effectiveDir }, data });
     }
 
     // MCP
-    if (p === "/mcp" && req.method === "GET") return json({});
+    if (p === "/mcp" && req.method === "GET") {
+      return json({ location: { directory: effectiveDir }, data: [] });
+    }
 
     // LSP
     if (p === "/lsp" && req.method === "GET") return json([]);
 
     // VCS
     if (p === "/vcs" && req.method === "GET") {
-      return json({ branch: "main", default_branch: "main" });
+      return json({ location: { directory: dir ?? process.cwd() }, data: { branch: { current: "main", default: "main" } } });
     }
 
     // Questions & Permissions
     if (p === "/form" && req.method === "GET") {
-      return json(listPendingQuestions(dir).map(toOpenCodeFormRequest));
+      return json({ location: { directory: dir ?? process.cwd() }, data: listPendingQuestions(dir).map(toOpenCodeFormRequest) });
     }
 
     if (p === "/permission/request" && req.method === "GET") {
-      return json(listPendingPermissions(dir).map(toOpenCodePermissionRequest));
+      return json({ location: { directory: dir ?? process.cwd() }, data: listPendingPermissions(dir).map(toOpenCodePermissionRequest) });
+    }
+
+    const sessionPermissionMatch = p.match(/^\/session\/([^/]+)\/permission(?:\/([^/]+)(?:\/reply)?)?$/);
+    if (sessionPermissionMatch) {
+      const sessionID = decodeURIComponent(sessionPermissionMatch[1]!);
+      const requestID = sessionPermissionMatch[2] ? decodeURIComponent(sessionPermissionMatch[2]) : undefined;
+      const isReply = p.endsWith("/reply");
+      const { session } = await resolveSessionRoute(sessionID, dir);
+      if (!session) return jsonError("session not found", 404);
+
+      if (!requestID && req.method === "GET") {
+        return json({ data: listPendingPermissions(session.directory)
+          .filter((request) => request.sessionID === sessionID)
+          .map(toOpenCodePermissionRequest) });
+      }
+      if (!requestID && req.method === "POST") {
+        const body = asRecord(await readJson(req));
+        if (typeof body?.action !== "string" || !Array.isArray(body.resources)) return jsonError("action and resources are required", 400);
+        const id = typeof body.id === "string" ? body.id : randomUUID();
+        return json({ data: { id, effect: "ask" } });
+      }
+      if (requestID && req.method === "GET" && !isReply) {
+        const request = getPendingPermission(requestID);
+        if (!request || request.sessionID !== sessionID) return jsonError("permission not found", 404);
+        return json({ data: toOpenCodePermissionRequest(request) });
+      }
+      if (requestID && req.method === "POST" && isReply) {
+        const body = asRecord(await readJson(req));
+        const decision = body?.decision === "always" || body?.decision === "reject" ? body.decision : "once";
+        const request = getPendingPermission(requestID);
+        if (!request || request.sessionID !== sessionID) return jsonError("permission not found", 404);
+        const ok = replyPermission(requestID, decision);
+        if (!ok) return jsonError("permission not found", 404);
+        emitPermissionReplied(sessionID, requestID, decision, session.directory);
+        return noContent();
+      }
     }
 
     if (p === "/permission" && req.method === "GET") {
@@ -1979,8 +2601,8 @@ const MIME_TYPES: Record<string, string> = {
     const permReplyMatch = p.match(/^\/permission\/([^/]+)\/reply$/);
     if (permReplyMatch && req.method === "POST") {
       const id = permReplyMatch[1];
-      const body = (await readJson(req)) as { reply?: "once" | "always" | "reject"; message?: string } | undefined;
-      const reply = body?.reply ?? "once";
+      const body = (await readJson(req)) as { reply?: "once" | "always" | "reject"; decision?: "once" | "always" | "reject"; message?: string } | undefined;
+      const reply = body?.decision ?? body?.reply ?? "once";
       const perm = getPendingPermission(id);
       const ok = replyPermission(id, reply);
       if (ok && perm) {

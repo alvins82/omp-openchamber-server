@@ -105,7 +105,7 @@ function assistantMessageRecord(openCodeId: string, text: string): OpenCodeMessa
 }
 
 const fakeStore = {
-  async create(directory?: string, init?: { title?: string; parentID?: string }): Promise<OpenCodeSession> {
+  async create(directory?: string, init?: { id?: string; title?: string; parentID?: string; agent?: string; model?: ModelRef; metadata?: Record<string, unknown> }): Promise<OpenCodeSession> {
     const native = crypto.randomUUID();
     const openCodeId = `ses_fake_${native}`;
     const now = Date.now();
@@ -117,17 +117,18 @@ const fakeStore = {
       path: `/tmp/fake-sessions/${native}`,
       title: init?.title,
       parentID: init?.parentID,
-      agent: "omp",
+      agent: init?.agent ?? "omp",
       model: {
-        id: `${fakeModel.providerID}/${fakeModel.modelID}`,
-        providerID: fakeModel.providerID,
-        modelID: fakeModel.modelID,
-        variant: fakeModel.variant,
+        id: `${init?.model?.providerID ?? fakeModel.providerID}/${init?.model?.modelID ?? fakeModel.modelID}`,
+        providerID: init?.model?.providerID ?? fakeModel.providerID,
+        modelID: init?.model?.modelID ?? fakeModel.modelID,
+        variant: init?.model?.variant ?? fakeModel.variant,
       },
       version: FAKE_VERSION,
       time: { created: now, updated: now },
       cost: 0,
       tokens: emptyTokens(),
+      metadata: init?.metadata,
     };
     sessions.set(openCodeId, { session, messages: [] });
     return session;
@@ -159,6 +160,17 @@ const fakeStore = {
     const entry = sessions.get(openCodeId);
     if (!entry) return null;
     if (updates.title !== undefined) entry.session.title = updates.title;
+    if (updates.agent !== undefined) entry.session.agent = updates.agent;
+    if (updates.model !== undefined) {
+      entry.session.model = {
+        id: `${updates.model.providerID}/${updates.model.modelID}`,
+        ...updates.model,
+      };
+    }
+    if (updates.revert !== undefined) {
+      if (updates.revert === null) delete entry.session.revert;
+      else entry.session.revert = updates.revert;
+    }
     if (updates.metadata !== undefined) {
       entry.session.metadata = { ...entry.session.metadata, ...updates.metadata };
     }
@@ -168,6 +180,49 @@ const fakeStore = {
       if (updates.time.archived === null) delete entry.session.time.archived;
       else entry.session.time.archived = updates.time.archived;
     }
+    entry.session.time.updated = Date.now();
+    return entry.session;
+  },
+
+  async commitRevert(openCodeId: string, messageID: string): Promise<boolean> {
+    const entry = sessions.get(openCodeId);
+    if (!entry) return false;
+    const index = entry.messages.findIndex((record) => record.info.id === messageID);
+    if (index < 0) return false;
+    entry.messages.splice(index);
+    delete entry.session.revert;
+    entry.session.time.updated = Date.now();
+    return true;
+  },
+
+  async fork(openCodeId: string, _directory: string, before?: string): Promise<OpenCodeSession | null> {
+    const parent = sessions.get(openCodeId);
+    if (!parent) return null;
+    const boundary = before === undefined
+      ? parent.messages.length
+      : parent.messages.findIndex((record) => record.info.id === before);
+    if (boundary < 0) return null;
+    const forked = await fakeStore.create(parent.session.directory, {
+      parentID: openCodeId,
+      title: `Fork of ${parent.session.title ?? parent.session.id}`,
+      agent: parent.session.agent,
+      model: parent.session.model,
+      metadata: parent.session.metadata,
+    });
+    const target = sessions.get(forked.id)!;
+    target.messages = parent.messages.slice(0, boundary).map((record) => {
+      const copy = structuredClone(record);
+      copy.info.sessionID = forked.id;
+      for (const part of copy.parts) part.sessionID = forked.id;
+      return copy;
+    });
+    return forked;
+  },
+
+  async move(openCodeId: string, directory: string): Promise<OpenCodeSession | null> {
+    const entry = sessions.get(openCodeId);
+    if (!entry) return null;
+    entry.session.directory = directory;
     entry.session.time.updated = Date.now();
     return entry.session;
   },
